@@ -1,0 +1,195 @@
+# Corpus manifest for LocalLLM RAG.
+# Run `python scripts/fetch_corpus.py` to fetch sources, then
+# `python scripts/build_index.py` to chunk + embed + index them.
+#
+# Each source has:
+#   id            unique identifier
+#   tier          1=languages, 2=pentest frameworks, 3=standards, 4=forensic
+#   kind          git_repo | zip_url | raw_url
+#   url           source URL
+#   path_filter   (git_repo only) sparse-checkout paths to limit clone size
+#   license       SPDX-style license id (informational)
+#   category      coarse classification used as retrieval metadata
+#   language      (optional) primary language for the source
+#
+# Sparse checkout is used aggressively to keep clones small (Metasploit alone
+# is ~3 GB without filtering).
+
+version: 1
+
+settings:
+  data_dir: data/corpus
+  index_dir: data/index
+  default_clone_depth: 1
+
+sources:
+  # ---------------------------------------------------------------
+  # Tier 1 — Language references and stdlib
+  # ---------------------------------------------------------------
+  - id: python_docs
+    tier: 1
+    description: "Python 3 stdlib docs (rST source from CPython repo)"
+    kind: git_repo
+    url: https://github.com/python/cpython.git
+    path_filter: ["Doc/"]
+    license: PSF-2.0
+    category: language_reference
+    language: python
+
+  - id: go_stdlib
+    tier: 1
+    description: "Go stdlib source (with doc comments) and language docs"
+    kind: git_repo
+    url: https://github.com/golang/go.git
+    path_filter: ["src/", "doc/"]
+    license: BSD-3-Clause
+    category: language_reference
+    language: go
+
+  - id: ruby_docs
+    tier: 1
+    description: "Ruby stdlib source and docs"
+    kind: git_repo
+    url: https://github.com/ruby/ruby.git
+    path_filter: ["doc/", "lib/"]
+    license: BSD-2-Clause
+    category: language_reference
+    language: ruby
+
+  - id: powershell_docs
+    tier: 1
+    description: "PowerShell 7.x reference (Microsoft Docs)"
+    kind: git_repo
+    url: https://github.com/MicrosoftDocs/PowerShell-Docs.git
+    path_filter: ["reference/"]
+    license: CC-BY-4.0
+    category: language_reference
+    language: powershell
+
+  # ---------------------------------------------------------------
+  # Tier 2 — Pentest frameworks
+  # ---------------------------------------------------------------
+  - id: impacket
+    tier: 2
+    description: "Impacket — Python AD/SMB/Kerberos toolkit"
+    kind: git_repo
+    url: https://github.com/fortra/impacket.git
+    license: Apache-2.0-modified
+    category: pentest_framework
+    language: python
+
+  - id: scapy
+    tier: 2
+    description: "Scapy — Python network packet manipulation"
+    kind: git_repo
+    url: https://github.com/secdev/scapy.git
+    path_filter: ["doc/", "scapy/"]
+    license: GPL-2.0
+    category: pentest_framework
+    language: python
+
+  - id: pwntools
+    tier: 2
+    description: "pwntools — Python CTF/exploitation framework"
+    kind: git_repo
+    url: https://github.com/Gallopsled/pwntools.git
+    path_filter: ["docs/", "pwnlib/"]
+    license: MIT
+    category: pentest_framework
+    language: python
+
+  - id: metasploit
+    tier: 2
+    description: "Metasploit Framework — Ruby modules and lib"
+    kind: git_repo
+    url: https://github.com/rapid7/metasploit-framework.git
+    path_filter: ["modules/", "documentation/", "lib/msf/"]
+    license: BSD-3-Clause
+    category: pentest_framework
+    language: ruby
+
+  - id: nmap_nse
+    tier: 2
+    description: "nmap NSE scripts and library"
+    kind: git_repo
+    url: https://github.com/nmap/nmap.git
+    path_filter: ["scripts/", "nselib/", "docs/"]
+    license: NPSL
+    category: pentest_framework
+    language: lua
+
+  - id: frida_docs
+    tier: 2
+    description: "Frida dynamic instrumentation docs"
+    kind: git_repo
+    url: https://github.com/frida/frida-website.git
+    license: wxWindows
+    category: pentest_framework
+
+  # ---------------------------------------------------------------
+  # Tier 3 — Security standards and methodology
+  # ---------------------------------------------------------------
+  - id: owasp_wstg
+    tier: 3
+    description: "OWASP Web Security Testing Guide"
+    kind: git_repo
+    url: https://github.com/OWASP/wstg.git
+    path_filter: ["document/"]
+    license: CC-BY-SA-4.0
+    category: standard
+
+  - id: owasp_asvs
+    tier: 3
+    description: "OWASP Application Security Verification Standard"
+    kind: git_repo
+    url: https://github.com/OWASP/ASVS.git
+    license: CC-BY-SA-4.0
+    category: standard
+
+  - id: owasp_cheatsheets
+    tier: 3
+    description: "OWASP Cheat Sheet Series"
+    kind: git_repo
+    url: https://github.com/OWASP/CheatSheetSeries.git
+    path_filter: ["cheatsheets/"]
+    license: CC-BY-SA-4.0
+    category: standard
+
+  - id: mitre_attack
+    tier: 3
+    description: "MITRE ATT&CK Enterprise (STIX)"
+    kind: git_repo
+    url: https://github.com/mitre/cti.git
+    path_filter: ["enterprise-attack/"]
+    license: Apache-2.0
+    category: standard
+
+  # ---------------------------------------------------------------
+  # Tier 4 — Forensic / DFIR tooling
+  # ---------------------------------------------------------------
+  - id: volatility3
+    tier: 4
+    description: "Volatility 3 memory forensics framework"
+    kind: git_repo
+    url: https://github.com/volatilityfoundation/volatility3.git
+    license: VSL-1.0
+    category: forensic
+    language: python
+
+  - id: yara_docs
+    tier: 4
+    description: "YARA rule language documentation"
+    kind: git_repo
+    url: https://github.com/VirusTotal/yara.git
+    path_filter: ["docs/"]
+    license: BSD-3-Clause
+    category: forensic
+
+  - id: sigma_rules
+    tier: 4
+    description: "Sigma generic detection rule format and rules"
+    kind: git_repo
+    url: https://github.com/SigmaHQ/sigma.git
+    path_filter: ["rules/", "documentation/"]
+    license: Apache-2.0 OR DRL-1.1
+    category: forensic

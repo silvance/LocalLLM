@@ -1,3 +1,5 @@
 streamlit
 ollama
 python-dotenv
+pyyaml
+chromadb
