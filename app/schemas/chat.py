@@ -37,3 +37,7 @@ class ChatChunk:
     model_name: str
     content: str = ""
     done: bool = False
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_duration_ns: int | None = None
+    eval_duration_ns: int | None = None

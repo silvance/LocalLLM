@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Literal
 
-ModelKey = Literal["granite", "gemma"]
-ModelSelection = Literal["auto", "granite", "gemma"]
+ModelKey = Literal["granite", "gemma", "qwen"]
+ModelSelection = Literal["auto", "granite", "gemma", "qwen"]
 
 
 @dataclass(frozen=True)

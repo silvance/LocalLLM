@@ -31,11 +31,12 @@ if "model_selection" not in st.session_state:
 with st.sidebar:
     st.header("Settings")
 
-    selection_options = ["auto", "granite", "gemma"]
+    selection_options = ["auto", "granite", "gemma", "qwen"]
     selected_option = st.selectbox(
         "Choose model mode",
         options=selection_options,
         index=selection_options.index(st.session_state.model_selection),
+        help="auto routes by prompt content (code → qwen, general → gemma, simple → granite).",
     )
     st.session_state.model_selection = selected_option
 

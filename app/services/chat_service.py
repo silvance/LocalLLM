@@ -2,8 +2,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 
 from app.config import get_settings
-from app.models.gemma_adapter import GemmaAdapter
-from app.models.granite_adapter import GraniteAdapter
+from app.models.ollama_adapter import OllamaAdapter
 from app.schemas.chat import ChatChunk, ChatRequest, ChatResponse
 from app.schemas.model import ModelKey, ModelSelection
 from app.services.model_router import ModelRouter, RoutingDecision
@@ -21,12 +20,13 @@ class ChatService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.router = ModelRouter()
-        self.adapters = {
-            "granite": GraniteAdapter(),
-            "gemma": GemmaAdapter(),
+        self.adapters: dict[ModelKey, OllamaAdapter] = {
+            "granite": OllamaAdapter("granite"),
+            "gemma": OllamaAdapter("gemma"),
+            "qwen": OllamaAdapter("qwen"),
         }
 
-    def _get_adapter(self, model_key: ModelKey):
+    def _get_adapter(self, model_key: ModelKey) -> OllamaAdapter:
         adapter = self.adapters.get(model_key)
         if adapter is None:
             raise ValueError(f"Unsupported model_key: {model_key}")
