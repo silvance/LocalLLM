@@ -63,7 +63,10 @@ def split_recursively(text: str, separators: list[str], max_size: int) -> list[s
     return [c for c in chunks if c.strip()]
 
 
-def chunk_file(path: Path, language: str) -> list[str]:
+AST_LANGS = {"python", "go", "ruby", "lua"}
+
+
+def _recursive_chunk_file(path: Path, language: str) -> list[str]:
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -72,3 +75,18 @@ def chunk_file(path: Path, language: str) -> list[str]:
         return []
     separators = SEPARATORS_BY_LANG.get(language, SEPARATORS_BY_LANG["text"])
     return split_recursively(text, separators, MAX_CHUNK_CHARS)
+
+
+def chunk_file(path: Path, language: str) -> list[str]:
+    """Chunk a file. Uses Tree-sitter AST chunking for supported languages
+    when available, otherwise falls back to the recursive splitter."""
+    if language in AST_LANGS:
+        try:
+            from app.services.rag_ast_chunker import ast_chunk_file  # lazy
+            chunks = ast_chunk_file(path, language)
+            if chunks is not None:
+                return chunks
+        except Exception:
+            # AST path failed — fall through to recursive splitter
+            pass
+    return _recursive_chunk_file(path, language)
