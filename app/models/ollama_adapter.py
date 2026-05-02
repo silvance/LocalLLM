@@ -1,80 +1,47 @@
-import time
 from collections.abc import Generator
 
 from ollama import Client
 
 from app.config import get_settings
-from app.models.base import BaseModelAdapter
-from app.schemas.chat import ChatChunk, ChatMessage, ChatRequest, ChatResponse
-from app.schemas.model import ModelInfo, ModelKey
+from app.schemas.chat import ChatChunk, ChatRequest
+from app.schemas.model import ModelKey
 
 
-class OllamaAdapter(BaseModelAdapter):
+class OllamaAdapter:
     def __init__(self, model_key: ModelKey) -> None:
         self.settings = get_settings()
         self.client = Client(host=self.settings.ollama_host)
         self.model_key = model_key
         self.model_name = self.settings.model_map[model_key]
 
-    def _build_messages(self, request: ChatRequest) -> list[dict[str, str]]:
-        return [
-            {"role": message.role, "content": message.content}
-            for message in request.messages
-        ]
-
-    def _build_options(self, request: ChatRequest) -> dict:
+    def _options(self, request: ChatRequest) -> dict:
         return {
-            "temperature": request.temperature if request.temperature is not None else self.settings.temperature,
-            "num_predict": request.max_tokens if request.max_tokens is not None else self.settings.max_tokens,
+            "temperature": (
+                request.temperature
+                if request.temperature is not None
+                else self.settings.temperature
+            ),
+            "num_predict": (
+                request.max_tokens
+                if request.max_tokens is not None
+                else self.settings.max_tokens
+            ),
             "num_ctx": self.settings.num_ctx,
         }
-
-    def chat(self, request: ChatRequest) -> ChatResponse:
-        started = time.perf_counter()
-
-        response = self.client.chat(
-            model=self.model_name,
-            messages=self._build_messages(request),
-            stream=False,
-            options=self._build_options(request),
-        )
-
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        content = response["message"]["content"]
-
-        prompt_tokens = response.get("prompt_eval_count")
-        completion_tokens = response.get("eval_count")
-        total_tokens = None
-        if prompt_tokens is not None and completion_tokens is not None:
-            total_tokens = prompt_tokens + completion_tokens
-
-        return ChatResponse(
-            model_key=self.model_key,
-            model_name=self.model_name,
-            message=ChatMessage(role="assistant", content=content),
-            done=response.get("done", True),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            latency_ms=latency_ms,
-        )
 
     def stream_chat(self, request: ChatRequest) -> Generator[ChatChunk, None, None]:
         stream = self.client.chat(
             model=self.model_name,
-            messages=self._build_messages(request),
+            messages=[{"role": m.role, "content": m.content} for m in request.messages],
             stream=True,
-            options=self._build_options(request),
+            options=self._options(request),
         )
-
         for chunk in stream:
-            content = chunk.get("message", {}).get("content", "")
             done = chunk.get("done", False)
-
             yield ChatChunk(
                 model_key=self.model_key,
                 model_name=self.model_name,
-                content=content,
+                content=chunk.get("message", {}).get("content", ""),
                 done=done,
                 prompt_tokens=chunk.get("prompt_eval_count") if done else None,
                 completion_tokens=chunk.get("eval_count") if done else None,
@@ -83,36 +50,26 @@ class OllamaAdapter(BaseModelAdapter):
             )
 
     def health_check(self) -> bool:
+        """Returns True if the configured model is registered in Ollama.
+        Doesn't verify the model can actually load — that takes too long for a
+        sidebar check."""
         try:
-            models_response = self.client.list()
-            models = models_response.get("models", [])
-
-            installed_names = set()
-
-            for model in models:
-                name = model.get("name") or model.get("model")
-                if not name:
-                    continue
-
-                installed_names.add(name)
-
-                if ":" in name:
-                    installed_names.add(name.split(":")[0])
-
-            target_names = {self.model_name}
-            if ":" in self.model_name:
-                target_names.add(self.model_name.split(":")[0])
-            else:
-                target_names.add(f"{self.model_name}:latest")
-
-            return any(name in installed_names for name in target_names)
-
+            response = self.client.list()
         except Exception:
             return False
 
-    def get_model_info(self) -> ModelInfo:
-        return ModelInfo(
-            key=self.model_key,
-            name=self.model_name,
-            backend="ollama",
-        )
+        installed: set[str] = set()
+        for model in response.get("models", []):
+            name = model.get("name") or model.get("model") or ""
+            if not name:
+                continue
+            installed.add(name)
+            if ":" in name:
+                installed.add(name.split(":")[0])
+
+        target = {self.model_name}
+        if ":" in self.model_name:
+            target.add(self.model_name.split(":")[0])
+        else:
+            target.add(f"{self.model_name}:latest")
+        return bool(target & installed)

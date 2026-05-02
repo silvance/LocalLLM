@@ -1,4 +1,4 @@
-"""Query-time RAG retrieval: vector search + BM25, fused with RRF."""
+"""Query-time RAG retrieval: vector + BM25 + RRF, with optional LLM rerank."""
 from __future__ import annotations
 
 import logging
@@ -41,16 +41,9 @@ class RAGService:
         self._reranker = None
         self.last_error: str | None = None
 
-    def _ensure_reranker(self):
-        if not self.settings.rag_rerank_enabled:
-            return None
-        if self._reranker is None:
-            from app.services.rag_reranker import LLMReranker  # lazy
-            self._reranker = LLMReranker(
-                ollama_host=self.settings.ollama_host,
-                model=self.settings.rag_rerank_model,
-            )
-        return self._reranker
+    # ------------------------------------------------------------------
+    # Lazy resource accessors
+    # ------------------------------------------------------------------
 
     def _ensure_collection(self):
         if self._collection is not None:
@@ -83,11 +76,23 @@ class RAGService:
             self._bm25_chunk_ids = None
         return self._bm25, self._bm25_chunk_ids
 
+    def _ensure_reranker(self):
+        if not self.settings.rag_rerank_enabled:
+            return None
+        if self._reranker is None:
+            from app.services.rag_reranker import LLMReranker  # lazy import
+            self._reranker = LLMReranker(
+                ollama_host=self.settings.ollama_host,
+                model=self.settings.rag_rerank_model,
+            )
+        return self._reranker
+
+    # ------------------------------------------------------------------
+    # Public surface
+    # ------------------------------------------------------------------
+
     def is_ready(self) -> bool:
-        try:
-            return self._ensure_collection().count() > 0
-        except Exception:
-            return False
+        return self.count() > 0
 
     def count(self) -> int:
         try:
@@ -95,17 +100,69 @@ class RAGService:
         except Exception:
             return 0
 
-    def _vector_candidates(self, query: str, candidate_k: int) -> tuple[list[str], dict[str, float]]:
+    def retrieve(self, query: str, k: int | None = None) -> list[Retrieval]:
+        self.last_error = None
+        stripped = query.strip()
+        if not stripped or len(stripped) < self.settings.rag_min_query_len:
+            return []
+        k = k or self.settings.rag_retrieval_k
+
+        reranker = self._ensure_reranker()
+        pool_size = self.settings.rag_rerank_pool if reranker else k
+        candidate_k = max(pool_size * 4, 20)
+
+        vec_ids, vec_distances = self._vector_candidates(query, candidate_k)
+        bm25_ids = self._bm25_candidates(query, candidate_k)
+        top_ids, fused = self._fuse(vec_ids, bm25_ids, pool_size)
+        if not top_ids:
+            return []
+
+        retrievals = self._hydrate(top_ids, vec_distances, fused)
+        if not retrievals:
+            return []
+
+        if reranker is not None and len(retrievals) > 1:
+            try:
+                return reranker.rerank(query, retrievals, top_k=k)
+            except Exception as exc:
+                logger.exception("Reranker failed; falling back to fusion order")
+                self.last_error = f"rerank: {exc}"
+        return retrievals[:k]
+
+    def format_context(
+        self,
+        retrievals: list[Retrieval],
+        max_chars: int | None = None,
+    ) -> str:
+        if not retrievals:
+            return ""
+        cap = max_chars or self.settings.rag_max_context_chars
+        parts: list[str] = []
+        used = 0
+        for r in retrievals:
+            block = f"--- {r.source_id}:{r.file_path} ({r.language}) ---\n{r.document}\n"
+            if used + len(block) > cap:
+                break
+            parts.append(block)
+            used += len(block)
+        return "\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Retrieval internals
+    # ------------------------------------------------------------------
+
+    def _vector_candidates(
+        self,
+        query: str,
+        candidate_k: int,
+    ) -> tuple[list[str], dict[str, float]]:
         try:
             collection = self._ensure_collection()
             embedding = self._ollama.embeddings(
                 model=self.settings.rag_embedding_model,
                 prompt=query,
             )["embedding"]
-            results = collection.query(
-                query_embeddings=[embedding],
-                n_results=candidate_k,
-            )
+            results = collection.query(query_embeddings=[embedding], n_results=candidate_k)
         except Exception as exc:
             logger.exception("Vector retrieval failed")
             self.last_error = f"vector: {exc}"
@@ -127,74 +184,60 @@ class RAGService:
             logger.exception("BM25 scoring failed")
             self.last_error = f"bm25: {exc}"
             return []
-        top_idx = sorted(
-            range(len(scores)),
-            key=lambda i: float(scores[i]),
-            reverse=True,
-        )[:candidate_k]
-        return [chunk_ids[i] for i in top_idx if float(scores[i]) > 0.0]
+        ranked = sorted(range(len(scores)), key=lambda i: float(scores[i]), reverse=True)
+        return [chunk_ids[i] for i in ranked[:candidate_k] if float(scores[i]) > 0.0]
 
-    def retrieve(self, query: str, k: int | None = None) -> list[Retrieval]:
-        # Reset error from any prior call so callers can check freshness
-        self.last_error = None
-        stripped = query.strip()
-        if not stripped:
-            return []
-        if len(stripped) < self.settings.rag_min_query_len:
-            # Don't retrieve for trivial inputs ("yes", "thanks", etc.)
-            return []
-        k = k or self.settings.rag_retrieval_k
-
-        # When reranking, fetch a larger pool to give the reranker headroom.
-        reranker = self._ensure_reranker()
-        pool_size = self.settings.rag_rerank_pool if reranker else k
-        candidate_k = max(pool_size * 4, 20)
-
-        vec_ids, vec_distances = self._vector_candidates(query, candidate_k)
-        bm25_ids = self._bm25_candidates(query, candidate_k)
-
+    def _fuse(
+        self,
+        vec_ids: list[str],
+        bm25_ids: list[str],
+        pool_size: int,
+    ) -> tuple[list[str], dict[str, float] | None]:
+        """Fuse the two ranked id lists. Returns (top_ids, fused_scores).
+        fused_scores is None if only one retriever produced results."""
         if vec_ids and bm25_ids:
-            fused = reciprocal_rank_fusion([vec_ids, bm25_ids])
-            top_ids = sorted(fused, key=lambda x: fused[x], reverse=True)[:pool_size]
-            fused_used = True
-        elif vec_ids:
-            top_ids = vec_ids[:pool_size]
-            fused = {}
-            fused_used = False
-        elif bm25_ids:
-            top_ids = bm25_ids[:pool_size]
-            fused = {}
-            fused_used = False
-        else:
-            return []
+            scores = reciprocal_rank_fusion([vec_ids, bm25_ids])
+            top = sorted(scores, key=lambda i: scores[i], reverse=True)[:pool_size]
+            return top, scores
+        if vec_ids:
+            return vec_ids[:pool_size], None
+        if bm25_ids:
+            return bm25_ids[:pool_size], None
+        return [], None
 
+    def _hydrate(
+        self,
+        top_ids: list[str],
+        vec_distances: dict[str, float],
+        fused: dict[str, float] | None,
+    ) -> list[Retrieval]:
         try:
             collection = self._ensure_collection()
-            hydrated = collection.get(ids=top_ids)
+            data = collection.get(ids=top_ids)
         except Exception as exc:
-            logger.exception("Failed to hydrate retrieval candidates from Chroma")
+            logger.exception("Failed to hydrate candidates from Chroma")
             self.last_error = f"hydrate: {exc}"
             return []
 
         by_id: dict[str, tuple[str, dict]] = {}
-        h_ids = hydrated.get("ids") or []
-        h_docs = hydrated.get("documents") or []
-        h_metas = hydrated.get("metadatas") or [{}] * len(h_ids)
-        for cid, doc, meta in zip(h_ids, h_docs, h_metas):
+        ids = data.get("ids") or []
+        docs = data.get("documents") or []
+        metas = data.get("metadatas") or [{}] * len(ids)
+        for cid, doc, meta in zip(ids, docs, metas):
             by_id[cid] = (doc, meta or {})
 
-        retrievals: list[Retrieval] = []
+        out: list[Retrieval] = []
         for cid in top_ids:
             if cid not in by_id:
                 continue
             doc, meta = by_id[cid]
             if cid in vec_distances:
                 score = 1.0 - float(vec_distances[cid])
-            elif fused_used:
+            elif fused is not None:
                 score = fused.get(cid, 0.0)
             else:
                 score = 0.0
-            retrievals.append(Retrieval(
+            out.append(Retrieval(
                 document=doc,
                 source_id=meta.get("source_id", ""),
                 file_path=meta.get("file_path", ""),
@@ -202,30 +245,4 @@ class RAGService:
                 language=meta.get("source_language") or meta.get("language", ""),
                 score=score,
             ))
-
-        if reranker is not None and len(retrievals) > 1:
-            try:
-                retrievals = reranker.rerank(query, retrievals, top_k=k)
-            except Exception as exc:
-                logger.exception("Reranker failed; using fusion order")
-                self.last_error = f"rerank: {exc}"
-                retrievals = retrievals[:k]
-        else:
-            retrievals = retrievals[:k]
-
-        return retrievals
-
-    def format_context(self, retrievals: list[Retrieval], max_chars: int | None = None) -> str:
-        if not retrievals:
-            return ""
-        cap = max_chars or self.settings.rag_max_context_chars
-        parts: list[str] = []
-        used = 0
-        for r in retrievals:
-            header = f"--- {r.source_id}:{r.file_path} ({r.language}) ---"
-            block = f"{header}\n{r.document}\n"
-            if used + len(block) > cap:
-                break
-            parts.append(block)
-            used += len(block)
-        return "\n".join(parts)
+        return out

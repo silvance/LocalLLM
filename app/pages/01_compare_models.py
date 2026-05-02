@@ -80,7 +80,7 @@ if run:
             messages.append(ChatMessage(role="system", content=system_prompt))
         messages.append(ChatMessage(role="user", content=prompt))
 
-        request = ChatRequest(messages=messages, model_key=model_key, stream=True)
+        request = ChatRequest(messages=messages, stream=True)
 
         adapter = chat_service.adapters[model_key]
         wall_started = time.perf_counter()
