@@ -4,9 +4,13 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 echo === LocalLLM Airgap Installer ===
-echo.
+if exist bundle_stamp.json (
+    echo Bundle stamp:
+    type bundle_stamp.json
+    echo.
+)
 
-echo [1/4] Installing Python (silent)...
+echo [1/3] Installing Python (silent)...
 set "PY_INSTALLER="
 for %%f in (installers\python-*-amd64.exe) do set "PY_INSTALLER=%%f"
 if not defined PY_INSTALLER (
@@ -22,7 +26,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/4] Installing Ollama...
+echo [2/3] Installing Ollama...
 if not exist "installers\OllamaSetup.exe" (
     echo ERROR: installers\OllamaSetup.exe not found.
     exit /b 1
@@ -33,21 +37,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo.
-echo [3/4] Restoring Ollama models to %%USERPROFILE%%\.ollama\models ...
-if not exist "%USERPROFILE%\.ollama\models" mkdir "%USERPROFILE%\.ollama\models"
-xcopy /E /I /Y /Q "ollama_models\*" "%USERPROFILE%\.ollama\models\" >nul
-if errorlevel 1 (
-    echo ERROR: model copy failed.
-    exit /b 1
-)
+REM NOTE: we deliberately do NOT copy ollama_models\ into %USERPROFILE%\.ollama\.
+REM start.bat sets OLLAMA_MODELS to the bundle-local path so we never touch
+REM any existing Ollama install on this machine.
 
 echo.
-echo [4/4] Creating Python venv and installing dependencies offline...
+echo [3/3] Creating Python venv and installing dependencies offline...
 cd LocalLLM
 python -m venv .venv
 if errorlevel 1 (
-    echo ERROR: venv creation failed. Make sure Python is on PATH (open a new shell).
+    echo ERROR: venv creation failed. Open a fresh shell so PATH picks up Python, then re-run.
     exit /b 1
 )
 call .venv\Scripts\activate.bat
@@ -57,8 +56,12 @@ if errorlevel 1 (
     echo ERROR: pip install failed.
     exit /b 1
 )
+if not exist ".env" (
+    if exist ".env.example" copy /Y ".env.example" ".env" >nul
+)
 cd ..
 
 echo.
 echo Install complete. Run start.bat to launch LocalLLM.
+echo (Optional) Run verify.ps1 to validate bundle integrity against SHA256SUMS.txt.
 endlocal
