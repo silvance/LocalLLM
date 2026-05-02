@@ -11,12 +11,11 @@ import chromadb
 from ollama import Client
 
 from app.config import get_settings
+from app.services.rag_fusion import reciprocal_rank_fusion
 from app.services.rag_tokenize import tokenize
 
 
 logger = logging.getLogger("localllm")
-
-RRF_K = 60
 
 
 @dataclass
@@ -27,14 +26,6 @@ class Retrieval:
     category: str
     language: str
     score: float
-
-
-def _rrf(rankings: list[list[str]], k: int = RRF_K) -> dict[str, float]:
-    scores: dict[str, float] = {}
-    for ranking in rankings:
-        for rank, doc_id in enumerate(ranking):
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
-    return scores
 
 
 class RAGService:
@@ -147,7 +138,7 @@ class RAGService:
         bm25_ids = self._bm25_candidates(query, candidate_k)
 
         if vec_ids and bm25_ids:
-            fused = _rrf([vec_ids, bm25_ids])
+            fused = reciprocal_rank_fusion([vec_ids, bm25_ids])
             top_ids = sorted(fused, key=lambda x: fused[x], reverse=True)[:k]
             fused_used = True
         elif vec_ids:
