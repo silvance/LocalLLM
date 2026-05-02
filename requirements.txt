@@ -3,3 +3,4 @@ ollama
 python-dotenv
 pyyaml
 chromadb
+rank-bm25

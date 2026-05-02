@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import pickle
 import sys
 from pathlib import Path
 from typing import Iterator
@@ -14,9 +15,13 @@ from typing import Iterator
 import chromadb
 import yaml
 from ollama import Client
+from rank_bm25 import BM25Okapi
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from app.services.rag_tokenize import tokenize  # noqa: E402
 
 EXT_LANG: dict[str, str] = {
     ".md": "markdown", ".mdown": "markdown", ".markdown": "markdown",
@@ -240,7 +245,32 @@ def main() -> int:
 
     print(f"\nDone. files={files_seen}  indexed={chunks_indexed}  skipped={chunks_skipped}")
     print(f"Collection size: {collection.count()}")
+
+    rebuild_bm25(collection, index_dir)
     return 0
+
+
+def rebuild_bm25(collection, index_dir: Path) -> None:
+    """Fit BM25 over the full Chroma collection and pickle to disk.
+
+    Done at the end of every build so IDF stats reflect the global corpus.
+    """
+    print("\nRebuilding BM25 index over the full collection...")
+    all_data = collection.get(include=["documents"])
+    chunk_ids = list(all_data.get("ids") or [])
+    documents = list(all_data.get("documents") or [])
+    if not documents:
+        print("  collection empty; skipping BM25")
+        return
+    print(f"  tokenizing {len(documents)} chunks...")
+    tokenized = [tokenize(d) for d in documents]
+    print("  fitting BM25 (Okapi)...")
+    bm25 = BM25Okapi(tokenized)
+    out = index_dir / "bm25.pkl"
+    with out.open("wb") as f:
+        pickle.dump({"bm25": bm25, "chunk_ids": chunk_ids}, f)
+    size_mb = out.stat().st_size / 1024 / 1024
+    print(f"  saved {out} ({size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":
