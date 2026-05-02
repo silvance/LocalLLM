@@ -38,7 +38,19 @@ class RAGService:
         self._bm25: Any = None
         self._bm25_chunk_ids: list[str] | None = None
         self._bm25_loaded = False
+        self._reranker = None
         self.last_error: str | None = None
+
+    def _ensure_reranker(self):
+        if not self.settings.rag_rerank_enabled:
+            return None
+        if self._reranker is None:
+            from app.services.rag_reranker import LLMReranker  # lazy
+            self._reranker = LLMReranker(
+                ollama_host=self.settings.ollama_host,
+                model=self.settings.rag_rerank_model,
+            )
+        return self._reranker
 
     def _ensure_collection(self):
         if self._collection is not None:
@@ -132,21 +144,25 @@ class RAGService:
             # Don't retrieve for trivial inputs ("yes", "thanks", etc.)
             return []
         k = k or self.settings.rag_retrieval_k
-        candidate_k = max(k * 4, 20)
+
+        # When reranking, fetch a larger pool to give the reranker headroom.
+        reranker = self._ensure_reranker()
+        pool_size = self.settings.rag_rerank_pool if reranker else k
+        candidate_k = max(pool_size * 4, 20)
 
         vec_ids, vec_distances = self._vector_candidates(query, candidate_k)
         bm25_ids = self._bm25_candidates(query, candidate_k)
 
         if vec_ids and bm25_ids:
             fused = reciprocal_rank_fusion([vec_ids, bm25_ids])
-            top_ids = sorted(fused, key=lambda x: fused[x], reverse=True)[:k]
+            top_ids = sorted(fused, key=lambda x: fused[x], reverse=True)[:pool_size]
             fused_used = True
         elif vec_ids:
-            top_ids = vec_ids[:k]
+            top_ids = vec_ids[:pool_size]
             fused = {}
             fused_used = False
         elif bm25_ids:
-            top_ids = bm25_ids[:k]
+            top_ids = bm25_ids[:pool_size]
             fused = {}
             fused_used = False
         else:
@@ -186,6 +202,17 @@ class RAGService:
                 language=meta.get("source_language") or meta.get("language", ""),
                 score=score,
             ))
+
+        if reranker is not None and len(retrievals) > 1:
+            try:
+                retrievals = reranker.rerank(query, retrievals, top_k=k)
+            except Exception as exc:
+                logger.exception("Reranker failed; using fusion order")
+                self.last_error = f"rerank: {exc}"
+                retrievals = retrievals[:k]
+        else:
+            retrievals = retrievals[:k]
+
         return retrievals
 
     def format_context(self, retrievals: list[Retrieval], max_chars: int | None = None) -> str:
