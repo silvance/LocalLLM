@@ -43,18 +43,28 @@ class Settings:
 
     granite_model: str
     gemma_model: str
+    qwen_model: str
     default_model: str
 
     default_stream: bool
     request_timeout: int
     temperature: float
     max_tokens: int
+    num_ctx: int
+
+    rag_enabled: bool
+    rag_index_dir: str
+    rag_collection: str
+    rag_embedding_model: str
+    rag_retrieval_k: int
+    rag_max_context_chars: int
 
     @property
     def model_map(self) -> dict[str, str]:
         return {
             "granite": self.granite_model,
             "gemma": self.gemma_model,
+            "qwen": self.qwen_model,
         }
 
 
@@ -68,10 +78,19 @@ def get_settings() -> Settings:
 
         granite_model=os.getenv("GRANITE_MODEL", "granite4"),
         gemma_model=os.getenv("GEMMA_MODEL", "gemma4"),
-        default_model=os.getenv("DEFAULT_MODEL", "granite"),
+        qwen_model=os.getenv("QWEN_MODEL", "qwen3-coder:30b"),
+        default_model=os.getenv("DEFAULT_MODEL", "auto"),
 
         default_stream=_get_bool("DEFAULT_STREAM", True),
         request_timeout=_get_int("REQUEST_TIMEOUT", 120),
         temperature=_get_float("TEMPERATURE", 0.2),
         max_tokens=_get_int("MAX_TOKENS", 1024),
+        num_ctx=_get_int("NUM_CTX", 32768),
+
+        rag_enabled=_get_bool("RAG_ENABLED", False),
+        rag_index_dir=os.getenv("RAG_INDEX_DIR", "data/index"),
+        rag_collection=os.getenv("RAG_COLLECTION", "corpus"),
+        rag_embedding_model=os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text"),
+        rag_retrieval_k=_get_int("RAG_RETRIEVAL_K", 5),
+        rag_max_context_chars=_get_int("RAG_MAX_CONTEXT_CHARS", 8000),
     )

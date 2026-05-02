@@ -5,25 +5,29 @@ from ollama import Client
 
 from app.config import get_settings
 from app.models.base import BaseModelAdapter
-from app.schemas.chat import ChatChunk, ChatRequest, ChatResponse, ChatMessage
-from app.schemas.model import ModelInfo
+from app.schemas.chat import ChatChunk, ChatMessage, ChatRequest, ChatResponse
+from app.schemas.model import ModelInfo, ModelKey
 
 
-class GraniteAdapter(BaseModelAdapter):
-    def __init__(self) -> None:
+class OllamaAdapter(BaseModelAdapter):
+    def __init__(self, model_key: ModelKey) -> None:
         self.settings = get_settings()
         self.client = Client(host=self.settings.ollama_host)
-        self.model_key = "granite"
-        self.model_name = self.settings.model_map[self.model_key]
+        self.model_key = model_key
+        self.model_name = self.settings.model_map[model_key]
 
     def _build_messages(self, request: ChatRequest) -> list[dict[str, str]]:
         return [
-            {
-                "role": message.role,
-                "content": message.content,
-            }
+            {"role": message.role, "content": message.content}
             for message in request.messages
         ]
+
+    def _build_options(self, request: ChatRequest) -> dict:
+        return {
+            "temperature": request.temperature if request.temperature is not None else self.settings.temperature,
+            "num_predict": request.max_tokens if request.max_tokens is not None else self.settings.max_tokens,
+            "num_ctx": self.settings.num_ctx,
+        }
 
     def chat(self, request: ChatRequest) -> ChatResponse:
         started = time.perf_counter()
@@ -32,10 +36,7 @@ class GraniteAdapter(BaseModelAdapter):
             model=self.model_name,
             messages=self._build_messages(request),
             stream=False,
-            options={
-                "temperature": request.temperature if request.temperature is not None else self.settings.temperature,
-                "num_predict": request.max_tokens if request.max_tokens is not None else self.settings.max_tokens,
-            },
+            options=self._build_options(request),
         )
 
         latency_ms = int((time.perf_counter() - started) * 1000)
@@ -63,10 +64,7 @@ class GraniteAdapter(BaseModelAdapter):
             model=self.model_name,
             messages=self._build_messages(request),
             stream=True,
-            options={
-                "temperature": request.temperature if request.temperature is not None else self.settings.temperature,
-                "num_predict": request.max_tokens if request.max_tokens is not None else self.settings.max_tokens,
-            },
+            options=self._build_options(request),
         )
 
         for chunk in stream:
@@ -78,6 +76,10 @@ class GraniteAdapter(BaseModelAdapter):
                 model_name=self.model_name,
                 content=content,
                 done=done,
+                prompt_tokens=chunk.get("prompt_eval_count") if done else None,
+                completion_tokens=chunk.get("eval_count") if done else None,
+                total_duration_ns=chunk.get("total_duration") if done else None,
+                eval_duration_ns=chunk.get("eval_duration") if done else None,
             )
 
     def health_check(self) -> bool:
