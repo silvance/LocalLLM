@@ -1,3 +1,4 @@
+from contextlib import closing
 from pathlib import Path
 import sys
 
@@ -13,7 +14,14 @@ from app.utils.logger import setup_logger
 
 logger = setup_logger()
 settings = get_settings()
-chat_service = ChatService()
+
+
+@st.cache_resource
+def get_chat_service() -> ChatService:
+    return ChatService()
+
+
+chat_service = get_chat_service()
 
 st.set_page_config(
     page_title="LocalLLM",
@@ -44,13 +52,20 @@ with st.sidebar:
     st.session_state.model_selection = selected_option
 
     rag_count = chat_service.rag.count()
-    rag_label = f"Use RAG ({rag_count} chunks)" if rag_count else "Use RAG (no index — run scripts/build_index.py)"
+    if rag_count:
+        rag_label = f"Use RAG ({rag_count} chunks)"
+        rag_disabled = False
+    else:
+        rag_label = "Use RAG"
+        rag_disabled = True
     st.session_state.use_rag = st.checkbox(
         rag_label,
         value=st.session_state.use_rag and rag_count > 0,
-        disabled=rag_count == 0,
+        disabled=rag_disabled,
         help=f"Retrieval-augmented generation using `{settings.rag_embedding_model}`.",
     )
+    if rag_disabled:
+        st.caption("⚠️ no index — run `scripts/build_index.py`")
 
     if st.button("Check model health"):
         try:
@@ -81,11 +96,7 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    request = ChatRequest(
-        messages=st.session_state.messages,
-        model_key="granite",
-        stream=True,
-    )
+    request = ChatRequest(messages=st.session_state.messages, stream=True)
 
     execution = chat_service.stream_chat(
         request=request,
@@ -103,6 +114,9 @@ if prompt:
         else:
             st.caption(f"Using model: **{execution.selected_model}**")
 
+        if st.session_state.use_rag and chat_service.rag.last_error:
+            st.warning(f"⚠️ RAG: {chat_service.rag.last_error}")
+
         if execution.retrievals:
             with st.expander(f"📚 Retrieved {len(execution.retrievals)} sources", expanded=False):
                 for r in execution.retrievals:
@@ -116,10 +130,11 @@ if prompt:
         full_response = ""
 
         try:
-            for chunk in execution.stream:
-                if chunk.content:
-                    full_response += chunk.content
-                    response_placeholder.markdown(full_response)
+            with closing(execution.stream) as stream:
+                for chunk in stream:
+                    if chunk.content:
+                        full_response += chunk.content
+                        response_placeholder.markdown(full_response)
 
             if not full_response.strip():
                 full_response = "No response was returned by the model."

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from app.schemas.tool import ToolDefinition, ToolResult
+from app.schemas.tools import ToolDefinition, ToolResult
 
 
 class BaseTool(ABC):

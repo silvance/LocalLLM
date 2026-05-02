@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.schemas.tool import ToolDefinition, ToolResult
+from app.schemas.tools import ToolDefinition, ToolResult
 from app.tools.base import BaseTool
 
 

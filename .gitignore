@@ -22,6 +22,10 @@ Thumbs.db
 .vscode/
 *.swp
 
+# Secrets / local config
+.env
+.env.local
+
 # Local artifacts (RAG / models — populated later)
 data/
 models/cache/

@@ -1,4 +1,4 @@
-from app.schemas.tool import ToolCall, ToolDefinition, ToolResult
+from app.schemas.tools import ToolCall, ToolDefinition, ToolResult
 from app.tools.base import BaseTool
 
 

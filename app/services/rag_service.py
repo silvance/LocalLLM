@@ -1,6 +1,7 @@
 """Query-time RAG retrieval: vector search + BM25, fused with RRF."""
 from __future__ import annotations
 
+import logging
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,8 @@ from ollama import Client
 from app.config import get_settings
 from app.services.rag_tokenize import tokenize
 
+
+logger = logging.getLogger("localllm")
 
 RRF_K = 60
 
@@ -44,6 +47,7 @@ class RAGService:
         self._bm25: Any = None
         self._bm25_chunk_ids: list[str] | None = None
         self._bm25_loaded = False
+        self.last_error: str | None = None
 
     def _ensure_collection(self):
         if self._collection is not None:
@@ -99,7 +103,9 @@ class RAGService:
                 query_embeddings=[embedding],
                 n_results=candidate_k,
             )
-        except Exception:
+        except Exception as exc:
+            logger.exception("Vector retrieval failed")
+            self.last_error = f"vector: {exc}"
             return [], {}
         ids = (results.get("ids") or [[]])[0]
         distances = (results.get("distances") or [[]])[0]
@@ -114,7 +120,9 @@ class RAGService:
             return []
         try:
             scores = bm25.get_scores(query_tokens)
-        except Exception:
+        except Exception as exc:
+            logger.exception("BM25 scoring failed")
+            self.last_error = f"bm25: {exc}"
             return []
         top_idx = sorted(
             range(len(scores)),
@@ -124,7 +132,13 @@ class RAGService:
         return [chunk_ids[i] for i in top_idx if float(scores[i]) > 0.0]
 
     def retrieve(self, query: str, k: int | None = None) -> list[Retrieval]:
-        if not query.strip():
+        # Reset error from any prior call so callers can check freshness
+        self.last_error = None
+        stripped = query.strip()
+        if not stripped:
+            return []
+        if len(stripped) < self.settings.rag_min_query_len:
+            # Don't retrieve for trivial inputs ("yes", "thanks", etc.)
             return []
         k = k or self.settings.rag_retrieval_k
         candidate_k = max(k * 4, 20)
@@ -150,7 +164,9 @@ class RAGService:
         try:
             collection = self._ensure_collection()
             hydrated = collection.get(ids=top_ids)
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to hydrate retrieval candidates from Chroma")
+            self.last_error = f"hydrate: {exc}"
             return []
 
         by_id: dict[str, tuple[str, dict]] = {}

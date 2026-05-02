@@ -47,7 +47,6 @@ class Settings:
     default_model: str
 
     default_stream: bool
-    request_timeout: int
     temperature: float
     max_tokens: int
     num_ctx: int
@@ -58,6 +57,7 @@ class Settings:
     rag_embedding_model: str
     rag_retrieval_k: int
     rag_max_context_chars: int
+    rag_min_query_len: int
 
     @property
     def model_map(self) -> dict[str, str]:
@@ -82,7 +82,6 @@ def get_settings() -> Settings:
         default_model=os.getenv("DEFAULT_MODEL", "auto"),
 
         default_stream=_get_bool("DEFAULT_STREAM", True),
-        request_timeout=_get_int("REQUEST_TIMEOUT", 120),
         temperature=_get_float("TEMPERATURE", 0.2),
         max_tokens=_get_int("MAX_TOKENS", 1024),
         num_ctx=_get_int("NUM_CTX", 32768),
@@ -93,4 +92,5 @@ def get_settings() -> Settings:
         rag_embedding_model=os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text"),
         rag_retrieval_k=_get_int("RAG_RETRIEVAL_K", 5),
         rag_max_context_chars=_get_int("RAG_MAX_CONTEXT_CHARS", 8000),
+        rag_min_query_len=_get_int("RAG_MIN_QUERY_LEN", 8),
     )
