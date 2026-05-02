@@ -82,6 +82,10 @@ def main() -> int:
     parser.add_argument("--collection", default="corpus")
     parser.add_argument("--limit", type=int, default=None, help="Cap files indexed (debug)")
     parser.add_argument("--reset", action="store_true", help="Drop and recreate collection")
+    parser.add_argument(
+        "--batch-size", type=int, default=32,
+        help="How many chunks to embed per Ollama call (batch endpoint)",
+    )
     args = parser.parse_args()
 
     manifest_path = REPO_ROOT / args.manifest
@@ -115,15 +119,51 @@ def main() -> int:
 
     ollama = Client(host=args.ollama_host)
     try:
-        ollama.embeddings(model=args.embed_model, prompt="health check")
+        ollama.embed(model=args.embed_model, input=["health check"])
     except Exception as exc:
-        print(f"Failed to call Ollama for embeddings: {exc}")
-        print(f"Make sure `ollama pull {args.embed_model}` has been run.")
+        print(f"Failed to call Ollama batch embed: {exc}")
+        print(f"Make sure `ollama pull {args.embed_model}` has been run, "
+              f"and that ollama-python supports client.embed()")
         return 2
 
     files_seen = 0
     chunks_indexed = 0
     chunks_skipped = 0
+
+    # Pending batch — flushed when full or at the end of the run.
+    pending_ids: list[str] = []
+    pending_docs: list[str] = []
+    pending_metas: list[dict] = []
+
+    def flush_batch() -> None:
+        nonlocal chunks_indexed
+        if not pending_ids:
+            return
+        try:
+            resp = ollama.embed(model=args.embed_model, input=pending_docs)
+            embeds = resp["embeddings"]
+        except Exception as exc:
+            print(f"  batch embed of {len(pending_ids)} chunks failed: {exc}")
+            pending_ids.clear()
+            pending_docs.clear()
+            pending_metas.clear()
+            return
+        if len(embeds) != len(pending_ids):
+            print(
+                f"  batch embed returned {len(embeds)} embeddings "
+                f"for {len(pending_ids)} chunks; skipping batch"
+            )
+        else:
+            collection.upsert(
+                ids=pending_ids,
+                documents=pending_docs,
+                embeddings=embeds,
+                metadatas=pending_metas,
+            )
+            chunks_indexed += len(pending_ids)
+        pending_ids.clear()
+        pending_docs.clear()
+        pending_metas.clear()
 
     for source_dir, path in iter_corpus_files(data_dir):
         if args.limit is not None and files_seen >= args.limit:
@@ -140,25 +180,14 @@ def main() -> int:
 
         already = existing_ids_for_file(collection, source_id, relpath)
 
-        ids: list[str] = []
-        documents: list[str] = []
-        embeddings: list[list[float]] = []
-        metadatas: list[dict] = []
-
         for idx, chunk in enumerate(chunks):
             cid = chunk_id(source_id, relpath, idx)
             if cid in already:
                 chunks_skipped += 1
                 continue
-            try:
-                embed = ollama.embeddings(model=args.embed_model, prompt=chunk)["embedding"]
-            except Exception as exc:
-                print(f"  embed failed for {source_id}:{relpath}#{idx}: {exc}")
-                continue
-            ids.append(cid)
-            documents.append(chunk)
-            embeddings.append(embed)
-            metadatas.append({
+            pending_ids.append(cid)
+            pending_docs.append(chunk)
+            pending_metas.append({
                 "source_id": source_id,
                 "file_path": relpath,
                 "chunk_index": idx,
@@ -167,18 +196,13 @@ def main() -> int:
                 "category": meta.get("category", ""),
                 "tier": meta.get("tier", 0),
             })
-
-        if ids:
-            collection.upsert(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
-            chunks_indexed += len(ids)
+            if len(pending_ids) >= args.batch_size:
+                flush_batch()
 
         if files_seen % 50 == 0:
             print(f"  files={files_seen}  indexed={chunks_indexed}  skipped={chunks_skipped}")
+
+    flush_batch()
 
     print(f"\nDone. files={files_seen}  indexed={chunks_indexed}  skipped={chunks_skipped}")
     print(f"Collection size: {collection.count()}")
