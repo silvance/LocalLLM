@@ -12,8 +12,6 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from ollama import Client
-
 
 if TYPE_CHECKING:
     from app.services.rag_service import Retrieval
@@ -68,6 +66,10 @@ def _parse_scores(response: str, expected_count: int) -> list[float] | None:
 
 class LLMReranker:
     def __init__(self, ollama_host: str, model: str) -> None:
+        # Defer ollama import to instantiation so the module is testable
+        # in environments where ollama isn't installed (e.g. our CI image).
+        from ollama import Client
+
         self.client = Client(host=ollama_host)
         self.model = model
 
