@@ -26,3 +26,6 @@ Thumbs.db
 data/
 models/cache/
 *.gguf
+
+# Bundle output
+dist/
