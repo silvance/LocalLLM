@@ -5,7 +5,11 @@ is the language-aware fallback / small-file path.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+
+logger = logging.getLogger("localllm")
 
 EXT_LANG: dict[str, str] = {
     ".md": "markdown", ".mdown": "markdown", ".markdown": "markdown",
@@ -86,7 +90,18 @@ def chunk_file(path: Path, language: str) -> list[str]:
             chunks = ast_chunk_file(path, language)
             if chunks is not None:
                 return chunks
-        except Exception:
-            # AST path failed — fall through to recursive splitter
-            pass
+            logger.debug(
+                "AST chunker returned no chunks for %s (%s); falling back to recursive splitter",
+                path.name, language,
+            )
+        except ImportError:
+            logger.debug(
+                "tree-sitter not installed; using recursive splitter for %s (%s)",
+                path.name, language,
+            )
+        except Exception as exc:
+            logger.warning(
+                "AST chunker failed on %s (%s): %s — falling back to recursive splitter",
+                path.name, language, exc,
+            )
     return _recursive_chunk_file(path, language)

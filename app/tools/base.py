@@ -16,8 +16,11 @@ class BaseTool(ABC):
             if param not in arguments:
                 raise ValueError(f"Missing required parameter: {param}")
 
+        # Always validate that supplied arguments are declared. An empty
+        # `properties` schema means "no arguments are allowed", not "anything
+        # goes" (which the previous `properties and ...` guard implied).
         for arg_name in arguments:
-            if properties and arg_name not in properties:
+            if arg_name not in properties:
                 raise ValueError(f"Unexpected parameter: {arg_name}")
 
     @abstractmethod

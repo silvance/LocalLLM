@@ -48,3 +48,17 @@ def test_decision_carries_score_and_reason(router: ModelRouter) -> None:
     decision = router.route(make_request("Refactor this Python function"))
     assert isinstance(decision.complexity_score, int)
     assert decision.reason
+
+
+@pytest.mark.parametrize("prompt", [
+    "How do I import this CSV into Excel?",      # "import" is non-code here
+    "Find a book at the public library.",        # "library" is non-code here
+    "Stop by the chemistry module on Friday.",   # "module" is non-code here
+])
+def test_no_longer_overfires_on_generic_words(router: ModelRouter, prompt: str) -> None:
+    """library / module / import were dropped from CODE_KEYWORDS — these
+    prompts should not route to the coding model based on those alone."""
+    decision = router.route(make_request(prompt))
+    assert decision.selected_model != "qwen", (
+        f"unexpectedly routed to qwen; reason: {decision.reason}"
+    )

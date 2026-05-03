@@ -50,3 +50,13 @@ def test_unexpected_param_returns_error(registry: ToolRegistry) -> None:
 def test_unknown_tool_returns_error(registry: ToolRegistry) -> None:
     result = registry.execute(ToolCall(name="nonexistent", arguments={}))
     assert result.success is False
+
+
+def test_empty_properties_rejects_unexpected_args(registry: ToolRegistry) -> None:
+    """get_current_time declares no properties — supplying any argument must
+    fail validation. Prior to the fix this was silently accepted."""
+    result = registry.execute(
+        ToolCall(name="get_current_time", arguments={"surprise": "yes"})
+    )
+    assert result.success is False
+    assert "surprise" in (result.error or "")

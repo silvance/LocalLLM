@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.schemas.chat import ChatMessage
+
+
+logger = logging.getLogger("localllm")
 
 
 @dataclass
@@ -112,7 +116,8 @@ class ChatStorage:
             try:
                 with path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Skipping unreadable chat file %s: %s", path.name, exc)
                 continue
             out.append(ChatSummary(
                 id=str(data.get("id") or path.stem),
@@ -130,7 +135,8 @@ class ChatStorage:
         try:
             with path.open("r", encoding="utf-8") as f:
                 return _from_json(json.load(f))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to load chat %s: %s", chat_id, exc)
             return None
 
     def save(self, session: ChatSession) -> None:
