@@ -16,19 +16,22 @@ sneakernet:
 ## On the airgapped machine
 
 1. Copy the entire bundle directory somewhere stable, e.g. `C:\LocalLLM-Bundle\`.
-2. **Optional but recommended**: open PowerShell, `cd` to the bundle, and run:
+2. **Verify integrity BEFORE running install.bat** (running install first creates `LocalLLM\.venv\` and `*.pyc` files which would then mismatch the manifest):
    ```powershell
    powershell -ExecutionPolicy Bypass -File verify.ps1
    ```
-   This checks every bundle file against `SHA256SUMS.txt`. Mismatches = corrupted transfer.
+   Checks every file in the bundle against `SHA256SUMS.txt`. Mismatches = corrupted transfer or tampering. Re-transfer if anything fails.
 3. Open an **Administrator** PowerShell or cmd, `cd` to the bundle, run `install.bat`.
    It will:
-   - Show the bundle stamp (build date, target platform, model list)
+   - Show `bundle_stamp.json` (build date, target platform, model list, installer hashes)
+   - Run `verify-installers.ps1` to confirm each installer in `installers/` matches the SHA-256 recorded at bundle build time. The operator can pin specific Ollama / Python releases by dropping the binaries in *before* running `build_bundle.py` — the build script hashes them into the stamp, install.bat refuses to run if they don't match later.
    - Install Python 3.12 silently and add it to PATH
    - Install Ollama silently
    - Create `LocalLLM\.venv\` and `pip install` from the bundled wheels (offline)
    - Copy `.env.example` → `.env` if there's no existing config
 4. **Open a fresh shell** (so the new PATH applies), then `start.bat`.
+
+> Note: after `install.bat` runs, `verify.ps1` will report mismatches in `LocalLLM/.venv/` and `LocalLLM/__pycache__/` directories — that's expected (those didn't exist at build time). To re-verify the originally-shipped files, run `verify.ps1` only on a fresh extraction of the bundle.
 
 Streamlit opens at <http://127.0.0.1:8501>.
 

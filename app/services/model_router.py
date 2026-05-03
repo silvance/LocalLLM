@@ -20,8 +20,8 @@ FILE_EXTENSION_PATTERN = re.compile(
 CODE_KEYWORDS = {
     "code", "function", "method", "class", "implement", "debug", "refactor",
     "syntax", "compile", "stacktrace", "stack trace", "traceback", "exception",
-    "regex", "algorithm", "endpoint", "schema", "query", "library",
-    "framework", "package", "module", "import", "dependency", "snippet",
+    "regex", "algorithm", "endpoint", "schema", "query",
+    "framework", "package", "dependency", "snippet",
     "bug", "crash", "unit test", "type hint",
     "python", "javascript", "typescript", "rust", "golang", "java", "c++",
     "ruby", "powershell", "bash", "node", "react",

@@ -199,7 +199,14 @@ def copy_templates(dst_root: Path) -> None:
     if not src.exists():
         print("  WARN: bundle_templates/ not found — bundle will lack install/start scripts")
         return
-    for name in ["install.bat", "start.bat", "verify.ps1", "INSTALL.md", "README.md"]:
+    for name in [
+        "install.bat",
+        "start.bat",
+        "verify.ps1",
+        "verify-installers.ps1",
+        "INSTALL.md",
+        "README.md",
+    ]:
         s = src / name
         if s.exists():
             shutil.copy2(s, dst_root / name)
@@ -216,6 +223,37 @@ def copy_templates(dst_root: Path) -> None:
         )
 
 
+def _hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _scan_installers(dst_root: Path) -> list[dict]:
+    """Hash any installer the operator dropped into installers/ before
+    bundling. We can't pin Ollama's "latest" URL upstream, but we can pin
+    *the binary that's about to ship* by recording its SHA-256 in the
+    stamp — install.bat verifies this before running anything.
+    """
+    installers_dir = dst_root / "installers"
+    if not installers_dir.exists():
+        return []
+    out: list[dict] = []
+    for path in sorted(installers_dir.iterdir()):
+        if not path.is_file():
+            continue
+        if path.name == "PUT_INSTALLERS_HERE.txt":
+            continue
+        out.append({
+            "name": path.name,
+            "size_bytes": path.stat().st_size,
+            "sha256": _hash_file(path),
+        })
+    return out
+
+
 def write_bundle_stamp(
     dst_root: Path,
     models: list[str],
@@ -225,7 +263,7 @@ def write_bundle_stamp(
     models_info: dict,
 ) -> None:
     stamp = {
-        "schema_version": 1,
+        "schema_version": 2,
         "build_date": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "build_host": {
             "os": platform.system(),
@@ -239,6 +277,10 @@ def write_bundle_stamp(
         "models": list(models),
         "models_total_bytes": models_info.get("total_bytes", 0) if models_info else 0,
         "wheels_count": wheels_count,
+        # Empty list if the operator hasn't dropped installers in yet — they
+        # can re-run --skip-models --skip-wheels --skip-index to refresh the
+        # stamp after adding them. install.bat warns when this is empty.
+        "installers": _scan_installers(dst_root),
     }
     out = dst_root / "bundle_stamp.json"
     out.write_text(json.dumps(stamp, indent=2), encoding="utf-8")
