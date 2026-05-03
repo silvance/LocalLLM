@@ -26,7 +26,11 @@ class OllamaAdapter:
                 if request.max_tokens is not None
                 else self.settings.max_tokens
             ),
-            "num_ctx": self.settings.num_ctx,
+            "num_ctx": (
+                request.num_ctx
+                if request.num_ctx is not None
+                else self.settings.num_ctx
+            ),
         }
 
     def stream_chat(self, request: ChatRequest) -> Generator[ChatChunk, None, None]:

@@ -16,6 +16,7 @@ class ChatRequest:
     stream: bool = True
     temperature: float | None = None
     max_tokens: int | None = None
+    num_ctx: int | None = None
 
 
 @dataclass
