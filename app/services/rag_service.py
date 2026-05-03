@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ from ollama import Client
 from app.config import get_settings
 from app.services.rag_fusion import reciprocal_rank_fusion
 from app.services.rag_tokenize import tokenize
+from app.utils.bm25_io import load_bm25
 
 
 logger = logging.getLogger("localllm")
@@ -63,17 +63,19 @@ class RAGService:
         if self._bm25_loaded:
             return self._bm25, self._bm25_chunk_ids
         self._bm25_loaded = True
-        bm25_path = self.index_dir / "bm25.pkl"
-        if not bm25_path.exists():
+        bm25_path = self.index_dir / "bm25.json"
+        legacy = self.index_dir / "bm25.pkl"
+        if legacy.exists() and not bm25_path.exists():
+            logger.warning(
+                "Found legacy bm25.pkl at %s — refusing to load (pickle = RCE). "
+                "Re-run scripts/build_index.py to produce bm25.json.",
+                legacy,
+            )
             return None, None
-        try:
-            with bm25_path.open("rb") as f:
-                data = pickle.load(f)
-            self._bm25 = data.get("bm25")
-            self._bm25_chunk_ids = list(data.get("chunk_ids") or [])
-        except Exception:
-            self._bm25 = None
-            self._bm25_chunk_ids = None
+        loaded = load_bm25(bm25_path)
+        if loaded is None:
+            return None, None
+        self._bm25, self._bm25_chunk_ids = loaded
         return self._bm25, self._bm25_chunk_ids
 
     def _ensure_reranker(self):

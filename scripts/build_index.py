@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import pickle
 import sys
 from pathlib import Path
 from typing import Iterator
@@ -23,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from app.services.rag_chunker import EXT_LANG, chunk_file  # noqa: E402
 from app.services.rag_tokenize import tokenize  # noqa: E402
+from app.utils.bm25_io import save_bm25  # noqa: E402
 
 SKIP_DIRS = {".git", "node_modules", "vendor", "_build", "build", "dist", "__pycache__"}
 MAX_FILE_SIZE = 500_000
@@ -212,9 +212,10 @@ def main() -> int:
 
 
 def rebuild_bm25(collection, index_dir: Path) -> None:
-    """Fit BM25 over the full Chroma collection and pickle to disk.
+    """Fit BM25 over the full Chroma collection and serialize to JSON.
 
     Done at the end of every build so IDF stats reflect the global corpus.
+    JSON (not pickle) so a tampered artifact can't execute code on load.
     """
     print("\nRebuilding BM25 index over the full collection...")
     all_data = collection.get(include=["documents"])
@@ -227,11 +228,16 @@ def rebuild_bm25(collection, index_dir: Path) -> None:
     tokenized = [tokenize(d) for d in documents]
     print("  fitting BM25 (Okapi)...")
     bm25 = BM25Okapi(tokenized)
-    out = index_dir / "bm25.pkl"
-    with out.open("wb") as f:
-        pickle.dump({"bm25": bm25, "chunk_ids": chunk_ids}, f)
+    out = index_dir / "bm25.json"
+    save_bm25(bm25, chunk_ids, out)
     size_mb = out.stat().st_size / 1024 / 1024
     print(f"  saved {out} ({size_mb:.1f} MB)")
+    # Clean up any stale pickle from older builds so retrieval doesn't get
+    # confused by a file that no longer represents the current collection.
+    legacy = index_dir / "bm25.pkl"
+    if legacy.exists():
+        legacy.unlink()
+        print(f"  removed legacy {legacy.name}")
 
 
 if __name__ == "__main__":
