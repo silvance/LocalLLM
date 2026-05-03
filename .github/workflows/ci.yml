@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        # Keep this minimal: pure-Python deps only, no torch/chromadb.
+        # The test suite only exercises pure functions.
+        run: pip install pytest pyyaml rank-bm25 python-dotenv
+      - name: Byte-compile all Python files
+        run: python -m compileall -q app scripts tests
+      - name: Run tests
+        run: pytest -v
