@@ -8,6 +8,21 @@ if exist bundle_stamp.json (
     echo Bundle stamp:
     type bundle_stamp.json
     echo.
+) else (
+    echo WARNING: bundle_stamp.json missing. Bundle integrity cannot be verified.
+    echo.
+)
+
+REM Verify the installers we're about to run match the SHA-256 hashes
+REM recorded at bundle build time. If they don't, the operator either
+REM swapped the file or the bundle was tampered with — bail out.
+if exist verify-installers.ps1 (
+    echo Verifying installer integrity against bundle_stamp.json...
+    powershell -ExecutionPolicy Bypass -File verify-installers.ps1
+    if errorlevel 1 (
+        echo ERROR: installer verification failed. Refusing to install.
+        exit /b 1
+    )
 )
 
 echo [1/3] Installing Python (silent)...

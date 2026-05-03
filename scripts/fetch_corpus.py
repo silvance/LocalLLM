@@ -85,6 +85,29 @@ def fetch_git_repo(source: Source, dest: Path, depth: int) -> None:
         ])
 
 
+def _safe_extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
+    """Extract a zip while rejecting any member that would escape `dest`.
+
+    Defends against zip-slip: a malicious zip can contain entries with
+    relative paths like '../etc/passwd' or absolute paths that
+    zipfile.extractall would happily write outside the target directory.
+    """
+    dest_resolved = dest.resolve()
+    for member in zf.infolist():
+        # Reject obviously bad names before resolving.
+        if member.filename.startswith("/") or member.filename.startswith("\\"):
+            raise ValueError(f"zip-slip: absolute path in archive: {member.filename!r}")
+        if ".." in Path(member.filename).parts:
+            raise ValueError(f"zip-slip: parent traversal in archive: {member.filename!r}")
+        target = (dest / member.filename).resolve()
+        # Last line of defense: confirm the resolved path is inside dest.
+        if dest_resolved != target and dest_resolved not in target.parents:
+            raise ValueError(
+                f"zip-slip: archive entry would escape dest: {member.filename!r}"
+            )
+    zf.extractall(dest)
+
+
 def fetch_zip(source: Source, dest: Path) -> None:
     if dest.exists():
         print(f"[{source.id}] target exists; skipping")
@@ -94,9 +117,11 @@ def fetch_zip(source: Source, dest: Path) -> None:
     print(f"  downloading {source.url}", flush=True)
     urllib.request.urlretrieve(source.url, tmp)
     print(f"  extracting to {dest}", flush=True)
-    with zipfile.ZipFile(tmp) as zf:
-        zf.extractall(dest)
-    tmp.unlink(missing_ok=True)
+    try:
+        with zipfile.ZipFile(tmp) as zf:
+            _safe_extract_zip(zf, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def fetch_raw(source: Source, dest: Path) -> None:
