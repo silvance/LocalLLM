@@ -1,0 +1,16 @@
+# Optional dependencies — install if you want AST-aware code chunking
+# during corpus indexing (Python / Go / Ruby / Lua get parsed into
+# function/class chunks instead of falling back to the regex splitter).
+#
+#   pip install -r requirements-extras.txt
+#
+# These pins target Python 3.8-3.12. Tree-sitter-languages 1.10.x has no
+# wheels for Python 3.13+, so on newer Python you can either:
+#   - skip these (the chunker silently falls back to the recursive splitter)
+#   - install Python 3.12 alongside, build the bundle there
+#
+# tree-sitter-language-pack 1.x is the modern successor but downloads
+# grammars from GitHub at runtime, which doesn't work airgapped.
+
+tree-sitter==0.21.3
+tree-sitter-languages==1.10.2

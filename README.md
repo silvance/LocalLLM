@@ -20,11 +20,17 @@ A Streamlit chat app over local Ollama models with retrieval-augmented generatio
 # 1. Install Ollama and pull models
 ollama pull granite4 gemma4 qwen3-coder:30b nomic-embed-text
 
-# 2. Python deps
+# 2. Python deps (Python 3.8-3.13 supported)
 pip install -r requirements.txt
 
-# 3. Configure
-cp .env.example .env
+# 3. (Optional) AST-aware code chunking for the RAG indexer.
+#    Only available on Python 3.8-3.12 (tree-sitter-languages 1.10.x has
+#    no wheels for newer Python). Without it, indexing falls back to a
+#    regex-based recursive splitter, which is fine.
+pip install -r requirements-extras.txt
+
+# 4. Configure
+Copy-Item .env.example .env
 
 # 4. (Optional) Build the RAG corpus
 python scripts/fetch_corpus.py --tiers 1
