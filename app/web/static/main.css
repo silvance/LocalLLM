@@ -153,11 +153,20 @@ button {
 .chat {
   display: flex;
   flex-direction: column;
+  /* The grid cell is height: 100vh. min-height: 0 lets the flex column
+     shrink below its intrinsic content size, which is what makes the
+     inner .messages overflow-y: auto actually scroll. Without this, the
+     flex container expands to fit all messages and the scrollbar never
+     appears. */
+  min-height: 0;
   min-width: 0;
   background: var(--bg);
 }
 .messages {
   flex: 1;
+  /* Same fix at the flex item level for browsers that compute
+     min-height differently. */
+  min-height: 0;
   overflow-y: auto;
   padding: 1.5rem 2rem;
   display: flex;
@@ -205,6 +214,13 @@ button {
   content: "▍";
   color: var(--muted);
   animation: blink 1s step-end infinite;
+}
+.message .content.placeholder {
+  color: var(--muted);
+  font-style: italic;
+}
+.message .content.placeholder::after {
+  content: "";
 }
 @keyframes blink { 50% { opacity: 0; } }
 
