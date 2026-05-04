@@ -112,6 +112,38 @@ def test_text_buffer_persists_across_subscriptions() -> None:
     asyncio.run(scenario())
 
 
+def test_emit_event_records_checkpoint() -> None:
+    """Late subscribers (review page) need past section_start events to be
+    replayable. emit_event captures (event, payload, text_offset) on the Job
+    so the SSE handler can interleave them with text slices on replay."""
+    async def scenario() -> None:
+        mgr = JobManager()
+        job = mgr.create("c", {})
+        loop = asyncio.get_running_loop()
+
+        await asyncio.to_thread(mgr.emit_event, job.id, "section_start", {"index": 0, "role": "writer"}, loop)
+        await asyncio.to_thread(mgr.append_chunk, job.id, "writer output", loop)
+        await asyncio.to_thread(mgr.emit_event, job.id, "section_start", {"index": 1, "role": "reviewer"}, loop)
+        await asyncio.to_thread(mgr.append_chunk, job.id, "reviewer output", loop)
+
+        # Late subscriber after both sections fired
+        late_job, late_queue = mgr.subscribe(job.id)
+        assert late_job is not None
+        assert len(late_job.checkpoints) == 2
+
+        # Checkpoints in order, with correct text offsets
+        evt0, payload0, pos0 = late_job.checkpoints[0]
+        evt1, payload1, pos1 = late_job.checkpoints[1]
+        assert evt0 == "section_start" and payload0["role"] == "writer" and pos0 == 0
+        assert evt1 == "section_start" and payload1["role"] == "reviewer"
+        assert pos1 == len("writer output")
+        assert late_job.text == "writer outputreviewer output"
+
+        mgr.unsubscribe(job.id, late_queue)
+
+    asyncio.run(scenario())
+
+
 def test_unsubscribe_removes_only_target_queue() -> None:
     async def scenario() -> None:
         mgr = JobManager()

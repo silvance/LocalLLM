@@ -324,9 +324,24 @@ async def stream_job(job_id: str) -> StreamingResponse:
 
     async def gen() -> AsyncIterator[bytes]:
         try:
-            # Replay current buffer
-            if job.text:
+            # Replay buffered state. If the job has checkpoints (e.g. review
+            # page section_starts), interleave them with the corresponding
+            # text slices so late subscribers see the structure too. Without
+            # this, a client that subscribed after a section_start fires
+            # would see the tokens for that section but no marker telling
+            # the UI which role/model they belong to — i.e. silent void.
+            if job.checkpoints:
+                last_pos = 0
+                for event, payload, pos in job.checkpoints:
+                    if pos > last_pos:
+                        yield _sse("token", {"chunk": job.text[last_pos:pos]})
+                    yield _sse(event, payload)
+                    last_pos = pos
+                if last_pos < len(job.text):
+                    yield _sse("token", {"chunk": job.text[last_pos:]})
+            elif job.text:
                 yield _sse("token", {"chunk": job.text})
+
             if job.status in ("done", "error", "stopped"):
                 yield _sse(
                     "done",

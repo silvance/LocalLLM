@@ -33,6 +33,11 @@ class Job:
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Non-token events along with the text offset at which they fired.
+    # Lets a late SSE subscriber replay structural events (e.g. section_start
+    # on the review page) interleaved with their text slices instead of
+    # missing them entirely because they fired before subscribe().
+    checkpoints: list[tuple[str, Any, int]] = field(default_factory=list)
 
 
 class JobManager:
@@ -134,10 +139,13 @@ class JobManager:
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         """Emit an arbitrary SSE event (e.g. section_start for the review
-        page's writer/reviewer transitions). Doesn't touch job.text."""
+        page's writer/reviewer transitions). Doesn't touch job.text, but DOES
+        record a checkpoint so late subscribers can replay it."""
         with self._lock:
-            if job_id not in self._jobs:
+            job = self._jobs.get(job_id)
+            if job is None:
                 return
+            job.checkpoints.append((event, payload, len(job.text)))
         self._broadcast(job_id, event, payload, loop)
 
     def finish(

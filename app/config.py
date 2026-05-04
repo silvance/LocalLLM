@@ -95,23 +95,19 @@ def get_settings() -> Settings:
         rag_index_dir=os.getenv("RAG_INDEX_DIR", "data/index"),
         rag_collection=os.getenv("RAG_COLLECTION", "corpus"),
         rag_embedding_model=os.getenv("RAG_EMBEDDING_MODEL", "nomic-embed-text"),
-        rag_retrieval_k=_get_int("RAG_RETRIEVAL_K", 5),
+        # Default RAG tuned for the airgap target — wider net + reranker on.
+        # The reranker adds 1-2 sec/query on the 3070 but noticeably better
+        # citation relevance, which matters more than latency for the kind of
+        # focused coding work this app exists for.
+        rag_retrieval_k=_get_int("RAG_RETRIEVAL_K", 8),
         rag_max_context_chars=_get_int("RAG_MAX_CONTEXT_CHARS", 8000),
         rag_min_query_len=_get_int("RAG_MIN_QUERY_LEN", 8),
-        rag_rerank_enabled=_get_bool("RAG_RERANK_ENABLED", False),
+        rag_rerank_enabled=_get_bool("RAG_RERANK_ENABLED", True),
         rag_rerank_model=os.getenv("RAG_RERANK_MODEL", "granite4:tiny-h"),
         rag_rerank_pool=_get_int("RAG_RERANK_POOL", 20),
 
         default_system_prompt=os.getenv(
             "DEFAULT_SYSTEM_PROMPT",
-            # Defaults baked in:
-            # - Fence code so renderers don't autolink dotted identifiers
-            #   (`self.tools` becoming `[self.tools](http://self.tools)`).
-            # - DO NOT use markdown links for file paths or identifiers; the
-            #   model otherwise emits `[scope.py](http://scope.py)` everywhere,
-            #   which is just garbage that has to be cleaned up by hand.
-            # - Self-check imports before emitting code so we don't get
-            #   missing-name errors at runtime.
             "You are a coding assistant for security work (pentesting, "
             "digital forensics, CTF). Output rules:\n"
             "1. Wrap code in fenced markdown blocks (```language ... ```).\n"
@@ -120,6 +116,14 @@ def get_settings() -> Settings:
             "[scope.py](http://scope.py) — they are wrong.\n"
             "3. Before each code block, briefly verify the imports you use "
             "are real and the names you reference are defined.\n"
-            "4. Be concise; prefer a working example over a long explanation.",
+            "4. Python: add type hints to function signatures and return "
+            "types. Use specific exception types in `except` clauses, never "
+            "bare `except:`. Avoid `from x import *`.\n"
+            "5. Public functions and classes get a one-line docstring "
+            "stating their purpose.\n"
+            "6. Be concise; prefer a working example over a long "
+            "explanation. If the user asks for a full skeleton, build it "
+            "incrementally and self-check each piece compiles before moving "
+            "on.",
         ),
     )

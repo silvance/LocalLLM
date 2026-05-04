@@ -126,6 +126,89 @@ sources:
     license: wxWindows
     category: pentest_framework
 
+  # High-frequency Python tooling — the libraries actual security/forensic
+  # tools tend to be built ON TOP of, not the pen-test frameworks themselves.
+  # Helps the model produce idiomatic glue code, not just core logic.
+
+  - id: requests
+    tier: 2
+    description: "requests — Python HTTP client"
+    kind: git_repo
+    url: https://github.com/psf/requests.git
+    path_filter: ["docs/", "src/"]
+    license: Apache-2.0
+    category: python_lib
+    language: python
+
+  - id: httpx
+    tier: 2
+    description: "httpx — async-capable HTTP client used in modern tooling"
+    kind: git_repo
+    url: https://github.com/encode/httpx.git
+    path_filter: ["docs/", "httpx/"]
+    license: BSD-3-Clause
+    category: python_lib
+    language: python
+
+  - id: pydantic
+    tier: 2
+    description: "pydantic — data validation; foundation under FastAPI etc."
+    kind: git_repo
+    url: https://github.com/pydantic/pydantic.git
+    path_filter: ["docs/", "pydantic/"]
+    license: MIT
+    category: python_lib
+    language: python
+
+  - id: click
+    tier: 2
+    description: "click — CLI framework used by most Python pen-test tools"
+    kind: git_repo
+    url: https://github.com/pallets/click.git
+    path_filter: ["docs/", "src/"]
+    license: BSD-3-Clause
+    category: python_lib
+    language: python
+
+  - id: pytest
+    tier: 2
+    description: "pytest — Python testing framework"
+    kind: git_repo
+    url: https://github.com/pytest-dev/pytest.git
+    path_filter: ["doc/en/", "src/_pytest/"]
+    license: MIT
+    category: python_lib
+    language: python
+
+  - id: cryptography
+    tier: 2
+    description: "cryptography — Python crypto primitives, used for parsing PE/x509/JWT"
+    kind: git_repo
+    url: https://github.com/pyca/cryptography.git
+    path_filter: ["docs/", "src/cryptography/"]
+    license: Apache-2.0
+    category: python_lib
+    language: python
+
+  - id: paramiko
+    tier: 2
+    description: "paramiko — SSH client/server (lateral movement, ops automation)"
+    kind: git_repo
+    url: https://github.com/paramiko/paramiko.git
+    path_filter: ["sites/", "paramiko/"]
+    license: LGPL-2.1
+    category: python_lib
+    language: python
+
+  - id: gopacket
+    tier: 2
+    description: "gopacket — Go packet capture/manipulation (Scapy's Go cousin)"
+    kind: git_repo
+    url: https://github.com/google/gopacket.git
+    license: BSD-3-Clause
+    category: pentest_framework
+    language: go
+
   # ---------------------------------------------------------------
   # Tier 3 — Security standards and methodology
   # ---------------------------------------------------------------
@@ -162,6 +245,22 @@ sources:
     url: https://github.com/mitre/cti.git
     path_filter: ["enterprise-attack/"]
     license: Apache-2.0
+    category: standard
+
+  - id: payloads_all_the_things
+    tier: 3
+    description: "PayloadsAllTheThings — public payload/cheatsheet reference"
+    kind: git_repo
+    url: https://github.com/swisskyrepo/PayloadsAllTheThings.git
+    license: MIT
+    category: standard
+
+  - id: hacktricks
+    tier: 3
+    description: "HackTricks — defensive-aware reference of attack techniques"
+    kind: git_repo
+    url: https://github.com/HackTricks-wiki/hacktricks.git
+    license: CC-BY-4.0
     category: standard
 
   # ---------------------------------------------------------------
