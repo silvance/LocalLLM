@@ -103,3 +103,55 @@
 .review-section .section-header {
   gap: 0.75rem;
 }
+
+/* Diff view (writer revisions) ------------------------------------- */
+
+.diff-summary {
+  padding: 0.4rem 0.75rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+  border-bottom: none;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.75rem;
+}
+.diff-summary .add-count { color: #7ed98a; }
+.diff-summary .del-count { color: #f0a39c; }
+
+.diff-view {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+  overflow-x: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.diff-line {
+  display: flex;
+  padding: 0 0.5rem;
+  white-space: pre;
+}
+.diff-line.add {
+  background: rgba(35, 134, 54, 0.18);
+  color: #b8efb8;
+}
+.diff-line.del {
+  background: rgba(248, 81, 73, 0.18);
+  color: #f5b8b3;
+}
+.diff-line.same { color: var(--text); }
+.diff-marker {
+  width: 1.4em;
+  text-align: center;
+  color: var(--muted);
+  flex-shrink: 0;
+  user-select: none;
+}
+.diff-text {
+  flex: 1;
+}
+.toggle-diff {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+}
