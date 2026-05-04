@@ -13,6 +13,7 @@
   const $form = document.getElementById("send-form");
   const $input = document.getElementById("composer-input");
   const $stopBtn = document.getElementById("stop-btn");
+  const $copyChatBtn = document.getElementById("copy-chat-btn");
 
   const $modelSelection = document.getElementById("model-selection");
   const $useRag = document.getElementById("use-rag");
@@ -24,9 +25,130 @@
   let activeJobId = initialJobId;
   let activeSource = null;
 
+  // ============================================================
+  // Helpers
+  // ============================================================
+
+  function escapeHtml(s) {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  // Tiny markdown-ish renderer: only handles fenced code blocks (```lang ... ```).
+  // Everything else stays as plain text. Returns HTML.
+  function renderWithCodeBlocks(text) {
+    const out = [];
+    const fence = /```([A-Za-z0-9_+-]*)\r?\n?([\s\S]*?)```/g;
+    let last = 0;
+    let m;
+    while ((m = fence.exec(text)) !== null) {
+      if (m.index > last) {
+        out.push(`<span class="prose">${escapeHtml(text.slice(last, m.index))}</span>`);
+      }
+      const lang = m[1] || "";
+      const code = m[2] || "";
+      out.push(
+        `<div class="code-block">` +
+          `<div class="code-header">` +
+            `<span class="code-lang">${escapeHtml(lang || "code")}</span>` +
+            `<button type="button" class="btn ghost copy-code">📋 Copy</button>` +
+          `</div>` +
+          `<pre><code class="language-${escapeHtml(lang)}">${escapeHtml(code)}</code></pre>` +
+        `</div>`,
+      );
+      last = fence.lastIndex;
+    }
+    if (last < text.length) {
+      out.push(`<span class="prose">${escapeHtml(text.slice(last))}</span>`);
+    }
+    return out.join("");
+  }
+
+  async function copyToClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      // Older browsers / non-secure contexts fall back to a hidden textarea.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+      document.body.removeChild(ta);
+      return ok;
+    }
+  }
+
+  function flashCopied(btn, label = "Copied") {
+    const original = btn.textContent;
+    btn.textContent = `✓ ${label}`;
+    btn.classList.add("copied");
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove("copied");
+    }, 1200);
+  }
+
+  // ============================================================
+  // Message rendering
+  // ============================================================
+
+  function buildMessageElement(role, content) {
+    const el = document.createElement("div");
+    el.className = `message ${role}`;
+    el.dataset.role = role;
+    el.innerHTML =
+      `<div class="message-header">` +
+        `<span class="role">${role}</span>` +
+        `<button type="button" class="btn ghost copy-msg" title="Copy message text">📋</button>` +
+      `</div>` +
+      `<div class="content"></div>`;
+    const contentEl = el.querySelector(".content");
+    contentEl.dataset.raw = content;
+    if (role === "assistant") {
+      contentEl.innerHTML = renderWithCodeBlocks(content);
+    } else {
+      contentEl.textContent = content;
+    }
+    return el;
+  }
+
+  function appendMessage(role, content) {
+    const el = buildMessageElement(role, content);
+    $messages.appendChild(el);
+    scrollToBottom();
+    return el;
+  }
+
+  // Re-process server-rendered messages on initial load: hydrate raw text into
+  // properly rendered HTML (code blocks etc.) and wire up copy buttons.
+  function hydrateInitialMessages() {
+    document.querySelectorAll(".messages .message").forEach((el) => {
+      const role = el.dataset.role;
+      const content = el.querySelector(".content");
+      const raw = content.dataset.raw || content.textContent;
+      content.dataset.raw = raw;
+      if (role === "assistant") {
+        content.innerHTML = renderWithCodeBlocks(raw);
+      } else {
+        content.textContent = raw;
+      }
+    });
+  }
+
+  // ============================================================
+  // Streaming
+  // ============================================================
+
   function scrollToBottom() {
-    // Defer one frame so the just-appended node is laid out before we
-    // measure scrollHeight (otherwise the scroll lags by one update).
     requestAnimationFrame(() => {
       $messages.scrollTop = $messages.scrollHeight;
     });
@@ -34,16 +156,6 @@
 
   function isScrolledNearBottom() {
     return $messages.scrollHeight - $messages.scrollTop - $messages.clientHeight < 80;
-  }
-
-  function appendMessage(role, content) {
-    const el = document.createElement("div");
-    el.className = `message ${role}`;
-    el.innerHTML = `<div class="role">${role}</div><div class="content"></div>`;
-    el.querySelector(".content").textContent = content;
-    $messages.appendChild(el);
-    scrollToBottom();
-    return el;
   }
 
   function showStreaming() {
@@ -105,12 +217,13 @@
       try {
         const data = JSON.parse(e.data);
         if (data.chunk) {
-          // Drop placeholder on first real token.
           if ($streamingContent.classList.contains("placeholder")) {
             $streamingContent.textContent = "";
             $streamingContent.classList.remove("placeholder");
           }
           const wasNearBottom = isScrolledNearBottom();
+          // Streaming bubble stays plain text; we render code blocks on
+          // finalize so we don't try to parse half-streamed fences.
           $streamingContent.textContent += data.chunk;
           if (wasNearBottom) scrollToBottom();
         }
@@ -132,20 +245,19 @@
     });
 
     src.onerror = () => {
-      // Browser will automatically retry; if the server has finished and
-      // gone away, the next replay will catch us up.
       console.warn("EventSource error; will retry");
     };
   }
 
-  // -------------------- Form submission --------------------
+  // ============================================================
+  // Form submission
+  // ============================================================
 
   $form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const content = $input.value.trim();
     if (!content) return;
 
-    // Echo user message immediately
     appendMessage("user", content);
     $input.value = "";
 
@@ -177,7 +289,6 @@
     }
   });
 
-  // Enter to send, Shift+Enter newline.
   $input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -185,7 +296,9 @@
     }
   });
 
-  // -------------------- Stop --------------------
+  // ============================================================
+  // Stop / delete chat
+  // ============================================================
 
   $stopBtn.addEventListener("click", async () => {
     if (!activeJobId) return;
@@ -195,8 +308,6 @@
       console.warn("stop failed", err);
     }
   });
-
-  // -------------------- Delete chat --------------------
 
   document.querySelectorAll(".btn.del").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -215,7 +326,47 @@
     });
   });
 
-  // -------------------- Resume in-flight job on load --------------------
+  // ============================================================
+  // Copy actions: per-message, per-code-block, whole chat
+  // ============================================================
+
+  // Event delegation so dynamically-added messages get the same behavior.
+  $messages.addEventListener("click", async (e) => {
+    const target = e.target;
+    if (target.classList.contains("copy-msg")) {
+      const msg = target.closest(".message");
+      const content = msg.querySelector(".content");
+      const raw = content.dataset.raw || content.textContent;
+      const ok = await copyToClipboard(raw);
+      if (ok) flashCopied(target);
+      return;
+    }
+    if (target.classList.contains("copy-code")) {
+      const block = target.closest(".code-block");
+      const codeEl = block.querySelector("pre code");
+      const ok = await copyToClipboard(codeEl.textContent);
+      if (ok) flashCopied(target);
+      return;
+    }
+  });
+
+  $copyChatBtn?.addEventListener("click", async () => {
+    const parts = [];
+    document.querySelectorAll(".messages .message").forEach((el) => {
+      const role = el.dataset.role || "unknown";
+      const raw = el.querySelector(".content").dataset.raw || el.querySelector(".content").textContent;
+      const heading = role.charAt(0).toUpperCase() + role.slice(1);
+      parts.push(`## ${heading}\n\n${raw.trim()}\n`);
+    });
+    const ok = await copyToClipboard(parts.join("\n"));
+    if (ok) flashCopied($copyChatBtn, "Chat copied");
+  });
+
+  // ============================================================
+  // Init
+  // ============================================================
+
+  hydrateInitialMessages();
 
   if (initialJobId) {
     subscribeToJob(initialJobId);

@@ -104,13 +104,22 @@ def get_settings() -> Settings:
 
         default_system_prompt=os.getenv(
             "DEFAULT_SYSTEM_PROMPT",
-            # Ships with a code-fencing reminder because some models (qwen3-coder
-            # in particular) otherwise dump scripts as bare prose, which the
-            # Streamlit markdown renderer then autolinks on dotted identifiers
-            # (`self.tools` -> `[self.tools](http://self.tools)`).
-            "You are a coding assistant for security work (pentesting, digital "
-            "forensics, CTF). Always wrap code in fenced markdown blocks "
-            "(```language ... ```). Be concise; prefer working examples over "
-            "long explanations.",
+            # Defaults baked in:
+            # - Fence code so renderers don't autolink dotted identifiers
+            #   (`self.tools` becoming `[self.tools](http://self.tools)`).
+            # - DO NOT use markdown links for file paths or identifiers; the
+            #   model otherwise emits `[scope.py](http://scope.py)` everywhere,
+            #   which is just garbage that has to be cleaned up by hand.
+            # - Self-check imports before emitting code so we don't get
+            #   missing-name errors at runtime.
+            "You are a coding assistant for security work (pentesting, "
+            "digital forensics, CTF). Output rules:\n"
+            "1. Wrap code in fenced markdown blocks (```language ... ```).\n"
+            "2. Write file paths and identifiers as plain text or inline "
+            "code (`like_this`). NEVER use markdown links like "
+            "[scope.py](http://scope.py) — they are wrong.\n"
+            "3. Before each code block, briefly verify the imports you use "
+            "are real and the names you reference are defined.\n"
+            "4. Be concise; prefer a working example over a long explanation.",
         ),
     )

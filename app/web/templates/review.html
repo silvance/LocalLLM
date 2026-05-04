@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LocalLLM — Review</title>
+  <link rel="stylesheet" href="/static/main.css">
+  <link rel="stylesheet" href="/static/review.css">
+</head>
+<body class="review-page">
+  <aside class="sidebar">
+    <header>
+      <h1>LocalLLM</h1>
+      <a href="/" class="btn ghost block" style="margin-top:0.5rem;text-align:center;text-decoration:none;">← Back to chat</a>
+    </header>
+
+    <section class="settings">
+      <h2>Roles</h2>
+      <label>
+        Writer model
+        <select id="writer-model">
+          {% for m in model_options %}
+            <option value="{{ m }}" {% if m == "qwen" %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Reviewer model
+        <select id="reviewer-model">
+          {% for m in model_options %}
+            <option value="{{ m }}" {% if m == "gemma" %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Rounds (2 = write+review only; 3 = + revise; 4+ = keep going)
+        <input type="number" id="rounds" min="2" max="6" value="3">
+      </label>
+
+      <h2>Settings</h2>
+      <label>
+        System prompt (optional)
+        <textarea id="system-prompt" rows="5" placeholder="Leave empty to use the default coding-assistant prompt."></textarea>
+      </label>
+      <details>
+        <summary>Inference parameters</summary>
+        <label>
+          Temperature
+          <input type="number" id="temperature" step="0.05" min="0" max="2" value="{{ settings.temperature }}">
+        </label>
+        <label>
+          Max tokens
+          <input type="number" id="max-tokens" step="256" min="32" max="32768" value="{{ settings.max_tokens }}">
+        </label>
+        <label>
+          num_ctx
+          <input type="number" id="num-ctx" step="2048" min="2048" max="262144" value="{{ settings.num_ctx }}">
+        </label>
+      </details>
+    </section>
+  </aside>
+
+  <main class="chat">
+    <div class="review-prompt">
+      <label for="review-prompt-input">Initial prompt</label>
+      <textarea
+        id="review-prompt-input"
+        rows="6"
+        placeholder="Describe what you want built. The writer model produces it, the reviewer critiques, then the writer revises."></textarea>
+      <div class="review-actions">
+        <button type="button" id="run-review" class="btn primary">▶ Run review</button>
+        <button type="button" id="stop-review" class="btn warn hidden">⏹ Stop</button>
+      </div>
+    </div>
+
+    <div id="review-stream" class="review-stream"></div>
+  </main>
+
+  <script src="/static/review.js"></script>
+</body>
+</html>

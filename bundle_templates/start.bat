@@ -46,6 +46,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Bind UI to localhost only — single-user local tool, no remote access.
-streamlit run app\main.py --server.address 127.0.0.1 --server.headless true
+REM Launch the FastAPI web UI on 127.0.0.1:8000 (single-user local tool;
+REM the FastAPI app keeps generations running across tab switches /
+REM browser refreshes, which the legacy Streamlit UI couldn't do).
+REM
+REM Pass --streamlit if you want the legacy UI:
+REM   start.bat --streamlit
+if /I "%~1"=="--streamlit" (
+    echo Launching legacy Streamlit UI...
+    streamlit run app\main.py --server.address 127.0.0.1 --server.headless true
+) else (
+    echo Launching FastAPI UI on http://127.0.0.1:8000 ...
+    python scripts\run_web.py --host 127.0.0.1 --port 8000
+)
 endlocal
