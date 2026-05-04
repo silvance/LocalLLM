@@ -11,6 +11,9 @@ from app.utils.hardware_info import (
     GPU,
     HardwareInfo,
     Recommendation,
+    _gpu_name_to_vram,
+    _guess_vendor,
+    _is_real_gpu,
     recommend_models,
     to_dict,
 )
@@ -78,3 +81,40 @@ def test_recommendation_includes_rationale() -> None:
     rec = recommend_models(make_hw(vram_gb=8, ram_gb=128))
     assert rec.rationale
     assert "VRAM" in rec.rationale or "RAM" in rec.rationale
+
+
+# Windows GPU lookup helpers (the actual Win32_VideoController shellout
+# is best-effort; tests target the pure name->vram mapping).
+
+def test_known_amd_gpu_vram_lookup() -> None:
+    assert _gpu_name_to_vram("AMD Radeon RX 7900 XT") == 20.0
+    assert _gpu_name_to_vram("AMD Radeon RX 7900 XTX") == 24.0
+
+
+def test_known_nvidia_gpu_vram_lookup() -> None:
+    assert _gpu_name_to_vram("NVIDIA GeForce RTX 3070") == 8.0
+    assert _gpu_name_to_vram("NVIDIA GeForce RTX 4090") == 24.0
+
+
+def test_specific_sku_wins_over_substring() -> None:
+    """RTX 4070 Ti Super must not match the shorter 'rtx 4070' entry."""
+    assert _gpu_name_to_vram("NVIDIA GeForce RTX 4070 Ti SUPER") == 16.0
+    assert _gpu_name_to_vram("NVIDIA GeForce RTX 4070") == 12.0
+
+
+def test_unknown_gpu_returns_none() -> None:
+    assert _gpu_name_to_vram("Some Future GPU 99 XL Pro") is None
+
+
+def test_vendor_inference() -> None:
+    assert _guess_vendor("AMD Radeon RX 7900 XT") == "amd"
+    assert _guess_vendor("NVIDIA GeForce RTX 3070") == "nvidia"
+    assert _guess_vendor("Intel Arc A770") == "intel"
+    assert _guess_vendor("Mystery Card") == "unknown"
+
+
+def test_filter_synthetic_adapters() -> None:
+    assert _is_real_gpu("AMD Radeon RX 7900 XT") is True
+    assert _is_real_gpu("Microsoft Basic Display Adapter") is False
+    assert _is_real_gpu("Microsoft Remote Display Adapter") is False
+    assert _is_real_gpu("Microsoft Hyper-V Video") is False

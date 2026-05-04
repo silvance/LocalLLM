@@ -84,10 +84,9 @@ def _detect_nvidia() -> list[GPU]:
 
 
 def _detect_amd() -> list[GPU]:
-    """Try rocm-smi (Linux) or fall back to silent no-op. ROCm-on-Windows
-    is hit-or-miss; we don't try to interrogate it here. The user's actual
-    runtime check is whether Ollama can reach the GPU, which we don't
-    duplicate."""
+    """Try rocm-smi (mostly Linux; rare on Windows). ROCm-on-Windows is
+    hit-or-miss so the Windows fallback below picks up AMD cards via
+    Win32_VideoController instead."""
     if not shutil.which("rocm-smi"):
         return []
     try:
@@ -98,12 +97,130 @@ def _detect_amd() -> list[GPU]:
         )
     except Exception:
         return []
-    # rocm-smi --csv format varies between versions; just return a single
-    # generic AMD GPU entry without VRAM if we can't parse cleanly. Better
-    # than missing the GPU entirely.
     if "GPU" in out:
         return [GPU(vendor="amd", name="AMD GPU (rocm-smi)", vram_gb=None)]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Windows fallback: Get-CimInstance Win32_VideoController
+#
+# Win32_VideoController.AdapterRAM is a 32-bit field, so it caps at 4 GB
+# even on a 24 GB card. We work around this with a lookup table for common
+# 2020-2026 SKUs. Unknown cards fall back to AdapterRAM (which at least
+# proves a GPU exists, even if the VRAM number is wrong).
+# ---------------------------------------------------------------------------
+
+_KNOWN_GPU_VRAM: dict[str, float] = {
+    # NVIDIA — RTX 50 / 40 / 30 series
+    "rtx 5090": 32.0, "rtx 5080": 16.0, "rtx 5070 ti": 16.0, "rtx 5070": 12.0,
+    "rtx 4090": 24.0, "rtx 4080 super": 16.0, "rtx 4080": 16.0,
+    "rtx 4070 ti super": 16.0, "rtx 4070 ti": 12.0, "rtx 4070 super": 12.0,
+    "rtx 4070": 12.0, "rtx 4060 ti": 8.0, "rtx 4060": 8.0,
+    "rtx 3090 ti": 24.0, "rtx 3090": 24.0,
+    "rtx 3080 ti": 12.0, "rtx 3080": 10.0,
+    "rtx 3070 ti": 8.0, "rtx 3070": 8.0,
+    "rtx 3060 ti": 8.0, "rtx 3060": 12.0,
+    "rtx 3050": 8.0, "rtx 2080 ti": 11.0, "rtx 2080": 8.0, "rtx 2070": 8.0,
+    # NVIDIA workstation
+    "rtx a6000": 48.0, "rtx a5000": 24.0, "rtx a4000": 16.0,
+    "rtx 6000 ada": 48.0, "rtx 5000 ada": 32.0, "rtx 4000 ada": 20.0,
+    # AMD — RX 7000 / 6000 series
+    "rx 7900 xtx": 24.0, "rx 7900 xt": 20.0, "rx 7900 gre": 16.0,
+    "rx 7800 xt": 16.0, "rx 7700 xt": 12.0,
+    "rx 7600 xt": 16.0, "rx 7600": 8.0,
+    "rx 6950 xt": 16.0, "rx 6900 xt": 16.0,
+    "rx 6800 xt": 16.0, "rx 6800": 16.0,
+    "rx 6750 xt": 12.0, "rx 6700 xt": 12.0,
+    "rx 6650 xt": 8.0, "rx 6600 xt": 8.0, "rx 6600": 8.0,
+    "rx 6500 xt": 4.0, "rx 6400": 4.0,
+    # Intel Arc
+    "arc a770": 16.0, "arc a750": 8.0, "arc a580": 8.0, "arc a380": 6.0,
+    "arc b580": 12.0, "arc b570": 10.0,
+}
+
+_VENDOR_HINTS = (
+    ("nvidia", "nvidia"), ("geforce", "nvidia"), ("rtx ", "nvidia"),
+    ("gtx ", "nvidia"), ("quadro", "nvidia"), ("tesla", "nvidia"),
+    ("amd", "amd"), ("radeon", "amd"), ("rx ", "amd"), ("vega", "amd"),
+    ("intel", "intel"), ("arc ", "intel"), ("uhd", "intel"), ("iris", "intel"),
+)
+
+
+def _guess_vendor(name: str) -> str:
+    n = name.lower()
+    for needle, vendor in _VENDOR_HINTS:
+        if needle in n:
+            return vendor
+    return "unknown"
+
+
+def _gpu_name_to_vram(name: str) -> float | None:
+    """Look up VRAM for a known SKU. Longest match wins so that
+    'rtx 4070 ti super' isn't shadowed by 'rtx 4070'."""
+    n = name.lower()
+    matches = [(k, v) for k, v in _KNOWN_GPU_VRAM.items() if k in n]
+    if not matches:
+        return None
+    matches.sort(key=lambda x: len(x[0]), reverse=True)
+    return matches[0][1]
+
+
+def _is_real_gpu(name: str) -> bool:
+    """Filter out Windows synthetic / virtual display adapters."""
+    n = name.lower()
+    return not any(
+        bad in n
+        for bad in (
+            "basic display",
+            "remote display",
+            "remotefx",
+            "remote desktop",
+            "virtual display",
+            "microsoft hyper-v",
+        )
+    )
+
+
+def _detect_windows_gpu() -> list[GPU]:
+    if platform.system() != "Windows":
+        return []
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_VideoController | "
+        "Select-Object Name, AdapterRAM | "
+        "ConvertTo-Json -Depth 2",
+    ]
+    try:
+        out = subprocess.check_output(cmd, text=True, timeout=10)
+    except Exception:
+        return []
+
+    import json as _json
+    try:
+        data = _json.loads(out) if out.strip() else []
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return []
+
+    gpus: list[GPU] = []
+    for entry in data:
+        name = (entry.get("Name") or "").strip()
+        if not name or not _is_real_gpu(name):
+            continue
+        # Prefer the SKU lookup; fall back to AdapterRAM (capped at 4 GB).
+        vram_gb = _gpu_name_to_vram(name)
+        if vram_gb is None:
+            adapter_ram = entry.get("AdapterRAM") or 0
+            if adapter_ram:
+                vram_gb = round(adapter_ram / (1024 ** 3), 1)
+        gpus.append(GPU(vendor=_guess_vendor(name), name=name, vram_gb=vram_gb))
+    return gpus
 
 
 def _detect_cpu() -> tuple[str, int]:
@@ -126,13 +243,23 @@ def _ram_gb() -> float:
 
 def detect_hardware() -> HardwareInfo:
     cpu_name, cores = _detect_cpu()
+    raw_gpus = _detect_nvidia() + _detect_amd() + _detect_windows_gpu()
+
+    # Deduplicate by name — Windows might surface the same card via both
+    # nvidia-smi and Win32_VideoController. Prefer the entry with VRAM set.
+    by_name: dict[str, GPU] = {}
+    for g in raw_gpus:
+        existing = by_name.get(g.name)
+        if existing is None or (existing.vram_gb is None and g.vram_gb is not None):
+            by_name[g.name] = g
+
     return HardwareInfo(
         os_name=platform.system(),
         os_release=platform.release(),
         cpu_model=cpu_name,
         cpu_cores=cores,
         ram_gb=_ram_gb(),
-        gpus=_detect_nvidia() + _detect_amd(),
+        gpus=list(by_name.values()),
     )
 
 
