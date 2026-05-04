@@ -18,6 +18,7 @@
   let activeJobId = null;
   let activeSource = null;
   let currentSection = null;  // DOM element for the in-progress section
+  let lastSectionIndex = -1;  // Highest section_start index we've rendered (dedup)
 
   // ---- helpers (small subset of main.js so the page stands alone) ----
 
@@ -86,6 +87,11 @@
   // ---- Section rendering ----
 
   function appendSection(index, role, model) {
+    // Skip duplicates from the rare race where SSE replay + live queue both
+    // contain the same section_start.
+    if (typeof index === "number" && index <= lastSectionIndex) return;
+    if (typeof index === "number") lastSectionIndex = index;
+
     // Finalize the previous section (re-render with code blocks)
     finalizePrevious();
 
@@ -93,6 +99,7 @@
     sec.className = `review-section role-${role}`;
     sec.dataset.role = role;
     sec.dataset.model = model;
+    sec.dataset.sectionIndex = String(index);
     sec.innerHTML =
       `<div class="section-header">` +
         `<span class="role-label">Round ${index + 1} · ${role} · ${escapeHtml(model)}</span>` +
@@ -131,6 +138,7 @@
   function clearStream() {
     $stream.innerHTML = "";
     currentSection = null;
+    lastSectionIndex = -1;
   }
 
   // ---- SSE driver ----
