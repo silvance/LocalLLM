@@ -15,6 +15,7 @@
       <form action="/chats" method="post">
         <button type="submit" class="btn primary block">+ New chat</button>
       </form>
+      <button type="button" id="copy-chat-btn" class="btn block ghost">📋 Copy whole chat</button>
       <ul class="chat-list">
         {% for s in summaries %}
           <li class="chat-row {% if s.id == chat.id %}active{% endif %}">
@@ -78,15 +79,20 @@
   <main class="chat">
     <div id="messages" class="messages">
       {% for msg in chat.messages %}
-        <div class="message {{ msg.role }}">
-          <div class="role">{{ msg.role }}</div>
-          <div class="content">{{ msg.content }}</div>
+        <div class="message {{ msg.role }}" data-role="{{ msg.role }}">
+          <div class="message-header">
+            <span class="role">{{ msg.role }}</span>
+            <button type="button" class="btn ghost copy-msg" title="Copy message text">📋</button>
+          </div>
+          <div class="content" data-raw="{{ msg.content }}">{{ msg.content }}</div>
         </div>
       {% endfor %}
     </div>
 
     <div id="streaming" class="message assistant streaming hidden">
-      <div class="role">assistant</div>
+      <div class="message-header">
+        <span class="role">assistant</span>
+      </div>
       <div class="meta hidden"></div>
       <div class="content"></div>
       <div class="actions">

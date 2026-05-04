@@ -187,17 +187,94 @@ button {
 .message.assistant {
   align-self: flex-start;
 }
+.message-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.4rem;
+  gap: 0.5rem;
+}
 .message .role {
   font-size: 0.7rem;
   text-transform: uppercase;
   color: var(--muted);
   letter-spacing: 0.05em;
-  margin-bottom: 0.4rem;
 }
-.message .content {
+.copy-msg {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.4rem;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.message:hover .copy-msg {
+  opacity: 0.6;
+}
+.copy-msg:hover {
+  opacity: 1 !important;
+}
+.copy-msg.copied,
+#copy-chat-btn.copied,
+.copy-code.copied {
+  opacity: 1 !important;
+  color: var(--assistant);
+}
+
+/* Code blocks emitted by the renderer for triple-backtick fences. */
+.code-block {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 0.6rem 0;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+.code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+}
+.code-lang {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.copy-code {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+}
+.code-block pre {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+.code-block pre code {
+  background: transparent;
+  padding: 0;
+  white-space: pre;
+}
+.message .prose {
   white-space: pre-wrap;
   word-break: break-word;
+}
+#copy-chat-btn {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+.message .content {
+  word-break: break-word;
   line-height: 1.45;
+}
+.message.user .content,
+.message .content.placeholder {
+  white-space: pre-wrap;
 }
 .message .meta {
   font-size: 0.75rem;
