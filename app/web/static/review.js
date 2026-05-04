@@ -74,6 +74,116 @@
     setTimeout(() => { btn.textContent = o; btn.classList.remove("copied"); }, 1200);
   }
 
+  // ---- Line diff (LCS-based, ~O(m*n) — fine for typical code length) ----
+
+  function computeLineDiff(oldText, newText) {
+    const a = oldText.split("\n");
+    const b = newText.split("\n");
+    const m = a.length;
+    const n = b.length;
+    // dp[i][j] = LCS length of a[..i] and b[..j]
+    const dp = new Array(m + 1);
+    for (let i = 0; i <= m; i++) dp[i] = new Int32Array(n + 1);
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        if (a[i - 1] === b[j - 1]) dp[i][j] = dp[i - 1][j - 1] + 1;
+        else dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+    // Walk backwards through the table to build the diff sequence.
+    const out = [];
+    let i = m, j = n;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
+        out.push({ type: "same", text: a[i - 1] });
+        i--; j--;
+      } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+        out.push({ type: "add", text: b[j - 1] });
+        j--;
+      } else {
+        out.push({ type: "del", text: a[i - 1] });
+        i--;
+      }
+    }
+    return out.reverse();
+  }
+
+  function renderDiffHtml(lines) {
+    let added = 0, removed = 0;
+    const rows = [];
+    for (const line of lines) {
+      if (line.type === "add") added++;
+      else if (line.type === "del") removed++;
+      const marker = line.type === "add" ? "+" : line.type === "del" ? "−" : " ";
+      const text = line.text === "" ? " " : line.text;
+      rows.push(
+        `<div class="diff-line ${line.type}">` +
+          `<span class="diff-marker">${marker}</span>` +
+          `<span class="diff-text">${escapeHtml(text)}</span>` +
+        `</div>`
+      );
+    }
+    return (
+      `<div class="diff-summary">` +
+        `<span class="add-count">+${added}</span> ` +
+        `<span class="del-count">−${removed}</span>` +
+      `</div>` +
+      `<div class="diff-view">${rows.join("")}</div>`
+    );
+  }
+
+  function findPreviousWriterSection(sectionEl) {
+    let prev = sectionEl.previousElementSibling;
+    while (prev) {
+      if (prev.classList && prev.dataset && prev.dataset.role === "writer") return prev;
+      prev = prev.previousElementSibling;
+    }
+    return null;
+  }
+
+  function maybeAddDiffToggle(sectionEl) {
+    if (!sectionEl || sectionEl.dataset.role !== "writer") return;
+    if (sectionEl.querySelector(".toggle-diff")) return;  // idempotent
+    if (!findPreviousWriterSection(sectionEl)) return;    // no peer to diff against
+
+    const header = sectionEl.querySelector(".section-header");
+    if (!header) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn ghost toggle-diff";
+    btn.textContent = "🔀 Show diff";
+    // Place the diff toggle just before the copy button.
+    const copyBtn = header.querySelector(".copy-section");
+    if (copyBtn) {
+      header.insertBefore(btn, copyBtn);
+    } else {
+      header.appendChild(btn);
+    }
+  }
+
+  function toggleDiff(sectionEl) {
+    const body = sectionEl.querySelector(".section-body");
+    const btn = sectionEl.querySelector(".toggle-diff");
+    if (!body || !btn) return;
+
+    if (sectionEl.dataset.viewMode === "diff") {
+      // Switch back to rendered code
+      body.innerHTML = renderWithCodeBlocks(body.dataset.raw || "");
+      sectionEl.dataset.viewMode = "code";
+      btn.textContent = "🔀 Show diff";
+      return;
+    }
+    const prev = findPreviousWriterSection(sectionEl);
+    if (!prev) return;
+    const prevBody = prev.querySelector(".section-body");
+    const oldText = (prevBody && prevBody.dataset.raw) || "";
+    const newText = body.dataset.raw || "";
+    const diff = computeLineDiff(oldText, newText);
+    body.innerHTML = renderDiffHtml(diff);
+    sectionEl.dataset.viewMode = "diff";
+    btn.textContent = "📄 Show code";
+  }
+
   function scrollToBottom() {
     requestAnimationFrame(() => {
       $stream.scrollTop = $stream.scrollHeight;
@@ -100,14 +210,14 @@
     sec.dataset.role = role;
     sec.dataset.model = model;
     sec.dataset.sectionIndex = String(index);
+    sec.dataset.startedAt = String(Date.now());
+    sec.dataset.tokenCount = "0";
     sec.innerHTML =
       `<div class="section-header">` +
         `<span class="role-label">Round ${index + 1} · ${role} · ${escapeHtml(model)}</span>` +
+        `<span class="section-stats" data-stats="">…</span>` +
         `<button type="button" class="btn ghost copy-section">📋 Copy</button>` +
       `</div>` +
-      // The "loading" marker stays until the first real chunk arrives. Gives
-      // the user feedback during the long Ollama model-swap gap between
-      // rounds (e.g. qwen unload → gemma load can be 20-30 s on an 8 GB GPU).
       `<div class="section-body section-loading" data-raw="">⏳ Loading ${escapeHtml(role)} (${escapeHtml(model)})…</div>`;
     $stream.appendChild(sec);
     currentSection = sec;
@@ -123,6 +233,14 @@
     }
     body.dataset.raw = (body.dataset.raw || "") + chunk;
     body.textContent = body.dataset.raw;  // plain text while streaming
+
+    // Live "X tokens" counter — rough word-count proxy. Better than nothing
+    // and gives the user something to look at while a slow model warms up.
+    const tokens = (body.dataset.raw.match(/\S+/g) || []).length;
+    currentSection.dataset.tokenCount = String(tokens);
+    const stats = currentSection.querySelector(".section-stats");
+    if (stats) stats.textContent = `${tokens.toLocaleString()} tokens…`;
+
     // Only auto-scroll if the user was already near the bottom — don't yank
     // them away from older sections they're trying to read.
     if (isScrolledNearBottom()) scrollToBottom();
@@ -132,7 +250,36 @@
     if (!currentSection) return;
     const body = currentSection.querySelector(".section-body");
     const raw = body.dataset.raw || "";
-    body.innerHTML = renderWithCodeBlocks(raw);
+
+    // Replace with rendered markdown OR an explicit empty marker so the
+    // user can see which sections produced no output.
+    if (!raw.trim()) {
+      body.classList.remove("section-loading");
+      body.innerHTML = '<span class="empty-marker">⚠️ (model returned no output for this section)</span>';
+    } else {
+      body.classList.remove("section-loading");
+      body.innerHTML = renderWithCodeBlocks(raw);
+    }
+    currentSection.dataset.viewMode = "code";
+
+    // Final stats: token count + elapsed seconds.
+    const tokens = parseInt(currentSection.dataset.tokenCount || "0", 10);
+    const startedAt = parseInt(currentSection.dataset.startedAt || "0", 10);
+    const elapsed = startedAt ? ((Date.now() - startedAt) / 1000).toFixed(1) : null;
+    const stats = currentSection.querySelector(".section-stats");
+    if (stats) {
+      const parts = [];
+      parts.push(`${tokens.toLocaleString()} tokens`);
+      if (elapsed) parts.push(`${elapsed}s`);
+      if (tokens > 0 && elapsed && parseFloat(elapsed) > 0) {
+        parts.push(`${(tokens / parseFloat(elapsed)).toFixed(1)} tok/s`);
+      }
+      stats.textContent = parts.join(" · ");
+    }
+
+    // Add the diff toggle on writer revisions (any writer section that has
+    // a previous writer section to diff against).
+    maybeAddDiffToggle(currentSection);
   }
 
   function clearStream() {
@@ -233,6 +380,8 @@
       const code = t.closest(".code-block").querySelector("pre code").textContent;
       const ok = await copyToClipboard(code);
       if (ok) flashCopied(t);
+    } else if (t.classList.contains("toggle-diff")) {
+      toggleDiff(t.closest(".review-section"));
     }
   });
 
@@ -271,6 +420,8 @@
       const raw = body.dataset.raw || body.textContent;
       body.dataset.raw = raw;
       body.innerHTML = renderWithCodeBlocks(raw);
+      sec.dataset.viewMode = "code";
+      maybeAddDiffToggle(sec);
     });
   }
 
