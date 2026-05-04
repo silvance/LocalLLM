@@ -25,6 +25,11 @@ CODE_KEYWORDS = {
     "bug", "crash", "unit test", "type hint",
     "python", "javascript", "typescript", "rust", "golang", "java", "c++",
     "ruby", "powershell", "bash", "node", "react",
+    # Coding-task nouns common in this app's pentesting / forensic context.
+    # Adding these so prompts like "build me a forensics tool" route to qwen
+    # instead of bouncing through granite, which tends to refuse code asks.
+    "tool", "script", "program", "scanner", "parser", "decoder",
+    "exploit", "payload", "shellcode", "yara", "sigma", "pentest", "pentesting",
 }
 COMPLEX_KEYWORDS = {
     "analyze", "compare", "evaluate", "reason", "tradeoffs", "architecture",
