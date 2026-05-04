@@ -126,6 +126,20 @@ class JobManager:
             job.text += chunk
         self._broadcast(job_id, "token", {"chunk": chunk}, loop)
 
+    def emit_event(
+        self,
+        job_id: str,
+        event: str,
+        payload: Any,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Emit an arbitrary SSE event (e.g. section_start for the review
+        page's writer/reviewer transitions). Doesn't touch job.text."""
+        with self._lock:
+            if job_id not in self._jobs:
+                return
+        self._broadcast(job_id, event, payload, loop)
+
     def finish(
         self,
         job_id: str,

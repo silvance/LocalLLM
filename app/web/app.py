@@ -355,3 +355,209 @@ async def stop_job(job_id: str) -> JSONResponse:
 def _sse(event: str, data: dict) -> bytes:
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Review page (writer ↔ reviewer adversarial loop)
+# ---------------------------------------------------------------------------
+
+REVIEWER_INSTRUCTION = (
+    "You are a senior code reviewer. Review the following code for problems "
+    "that would prevent it from running cleanly: missing imports, undefined "
+    "names, dataclass misuse, attribute references that don't exist on the "
+    "class, broken control flow, security footguns, and any other concrete "
+    "bugs. List issues briefly and specifically — line refs or quoted "
+    "snippets where helpful. Do not rewrite the code yourself; just call out "
+    "what's wrong."
+)
+REVISE_INSTRUCTION = (
+    "You wrote the following code. A reviewer identified the issues below. "
+    "Produce a revised version that addresses every point. Output the full "
+    "revised code in fenced markdown blocks — do not skip unchanged sections."
+)
+
+
+@app.get("/review", response_class=HTMLResponse)
+async def review_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "review.html",
+        {
+            "settings": settings,
+            "model_options": ["auto", "granite", "gemma", "qwen"],
+        },
+    )
+
+
+@app.post("/api/review")
+async def start_review(request: Request) -> JSONResponse:
+    """Kick off a writer ↔ reviewer ↔ writer loop as a single Job.
+
+    The runner thread streams each role's output through the same Job buffer,
+    and emits 'section_start' SSE events between roles so the frontend can
+    label each block.
+    """
+    body = await _parse_message_body(request)
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(400, "empty prompt")
+
+    writer_model = body.get("writer_model") or "qwen"
+    reviewer_model = body.get("reviewer_model") or "gemma"
+    rounds = int(body.get("rounds") or 3)
+    if rounds < 2:
+        raise HTTPException(400, "rounds must be at least 2 (write + review)")
+    if rounds > 6:
+        raise HTTPException(400, "rounds capped at 6")
+
+    system_prompt = (body.get("system_prompt") or "").strip() or settings.default_system_prompt
+    temperature = body.get("temperature")
+    max_tokens = body.get("max_tokens")
+    num_ctx = body.get("num_ctx")
+
+    job = job_manager.create(
+        chat_id=f"review-{int(asyncio.get_running_loop().time())}",
+        request_data={
+            "kind": "review",
+            "writer_model": writer_model,
+            "reviewer_model": reviewer_model,
+            "rounds": rounds,
+            "prompt_chars": len(prompt),
+        },
+    )
+    loop = asyncio.get_running_loop()
+    _start_review_thread(
+        job=job,
+        prompt=prompt,
+        writer_model=writer_model,
+        reviewer_model=reviewer_model,
+        rounds=rounds,
+        system_prompt=system_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        num_ctx=num_ctx,
+        loop=loop,
+    )
+    return JSONResponse({"job_id": job.id})
+
+
+def _start_review_thread(
+    *,
+    job: Job,
+    prompt: str,
+    writer_model: str,
+    reviewer_model: str,
+    rounds: int,
+    system_prompt: str,
+    temperature: float | None,
+    max_tokens: int | None,
+    num_ctx: int | None,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    def _runner() -> None:
+        sections: list[dict] = []
+
+        def run_section(*, role: str, model: str, messages: list[ChatMessage]) -> str:
+            """Stream one role's response and capture its text. Returns the
+            collected text. Honors stop requests cooperatively."""
+            section_idx = len(sections)
+            job_manager.emit_event(
+                job.id,
+                "section_start",
+                {"index": section_idx, "role": role, "model": model},
+                loop,
+            )
+
+            req = ChatRequest(
+                messages=messages,
+                stream=True,
+                temperature=float(temperature) if temperature is not None else None,
+                max_tokens=int(max_tokens) if max_tokens is not None else None,
+                num_ctx=int(num_ctx) if num_ctx is not None else None,
+            )
+            execution = chat_service.stream_chat(request=req, selection=model, use_rag=False)
+            collected: list[str] = []
+            for chunk in execution.stream:
+                if job_manager.is_stop_requested(job.id):
+                    raise _StopRequested(execution.selected_model)
+                if chunk.content:
+                    collected.append(chunk.content)
+                    job_manager.append_chunk(job.id, chunk.content, loop)
+            return "".join(collected)
+
+        def base_messages() -> list[ChatMessage]:
+            msgs: list[ChatMessage] = []
+            if system_prompt:
+                msgs.append(ChatMessage(role="system", content=system_prompt))
+            return msgs
+
+        try:
+            # Round 0 — writer produces initial code
+            writer_msgs = base_messages() + [ChatMessage(role="user", content=prompt)]
+            writer_text = run_section(role="writer", model=writer_model, messages=writer_msgs)
+            sections.append({"role": "writer", "model": writer_model, "text": writer_text})
+
+            # Round 1 — reviewer critiques
+            review_user = (
+                f"{REVIEWER_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
+                f"---\n\nCode under review:\n\n{writer_text}"
+            )
+            reviewer_msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
+            review_text = run_section(role="reviewer", model=reviewer_model, messages=reviewer_msgs)
+            sections.append({"role": "reviewer", "model": reviewer_model, "text": review_text})
+
+            # Subsequent rounds alternate writer/reviewer up to `rounds` total
+            for i in range(2, rounds):
+                if i % 2 == 0:
+                    # Writer revises
+                    revise_user = (
+                        f"{REVISE_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
+                        f"---\n\nYour previous code:\n\n{sections[-2]['text']}\n\n"
+                        f"---\n\nReviewer's notes:\n\n{sections[-1]['text']}"
+                    )
+                    msgs = base_messages() + [ChatMessage(role="user", content=revise_user)]
+                    text = run_section(role="writer", model=writer_model, messages=msgs)
+                    sections.append({"role": "writer", "model": writer_model, "text": text})
+                else:
+                    # Reviewer rounds 2 onwards: review the latest revision
+                    review_user = (
+                        f"{REVIEWER_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
+                        f"---\n\nLatest code:\n\n{sections[-1]['text']}"
+                    )
+                    msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
+                    text = run_section(role="reviewer", model=reviewer_model, messages=msgs)
+                    sections.append({"role": "reviewer", "model": reviewer_model, "text": text})
+
+            job_manager.finish(
+                job.id,
+                "done",
+                loop,
+                metadata={"kind": "review", "sections": sections},
+            )
+        except _StopRequested as stop:
+            job_manager.finish(
+                job.id,
+                "stopped",
+                loop,
+                metadata={
+                    "kind": "review",
+                    "sections": sections,
+                    "stopped_during": stop.model,
+                },
+            )
+        except Exception as exc:
+            logger.exception("Review job %s failed", job.id)
+            job_manager.finish(
+                job.id,
+                "error",
+                loop,
+                error=str(exc),
+                metadata={"kind": "review", "sections": sections},
+            )
+
+    threading.Thread(target=_runner, daemon=True, name=f"review-{job.id[:8]}").start()
+
+
+class _StopRequested(Exception):
+    def __init__(self, model: str) -> None:
+        self.model = model
