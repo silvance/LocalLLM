@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LocalLLM — Hardware</title>
+  <link rel="stylesheet" href="/static/main.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <header>
+      <h1>LocalLLM</h1>
+      <a href="/" class="btn ghost block" style="margin-top:0.5rem;text-align:center;text-decoration:none;">← Back to chat</a>
+    </header>
+    <section class="settings">
+      <h2>Pages</h2>
+      <a href="/" class="btn ghost block" style="text-align:center;text-decoration:none;">Chat</a>
+      <a href="/review" class="btn ghost block" style="text-align:center;text-decoration:none;margin-top:0.4rem;">⚖ Review</a>
+    </section>
+  </aside>
+
+  <main class="chat" style="overflow-y:auto;">
+    <div style="padding:1.5rem 2rem;display:flex;flex-direction:column;gap:1.5rem;max-width:78ch;">
+
+      <header>
+        <h1 style="margin:0 0 0.25rem;">Hardware &amp; recommended models</h1>
+        <p style="color:var(--muted);margin:0;font-size:0.9rem;">
+          Detection runs each time you load this page. Recommendations are based on
+          what fits your largest GPU's VRAM and your system RAM.
+        </p>
+      </header>
+
+      <section class="message assistant" style="max-width:none;">
+        <div class="message-header">
+          <span class="role">detected</span>
+        </div>
+        <div class="content">
+          <table class="hw-table">
+            <tr><th>OS</th><td>{{ hw.os_name }} {{ hw.os_release }}</td></tr>
+            <tr><th>CPU</th><td>{{ hw.cpu_model }} <span style="color:var(--muted);">({{ hw.cpu_cores }} cores)</span></td></tr>
+            <tr><th>RAM</th><td>{{ "%.1f"|format(hw.ram_gb) }} GB</td></tr>
+            <tr><th>GPU</th>
+              <td>
+                {% if hw.gpus %}
+                  {% for g in hw.gpus %}
+                    <div>{{ g.vendor }}: {{ g.name }}
+                      {% if g.vram_gb %}<span style="color:var(--muted);">({{ "%.1f"|format(g.vram_gb) }} GB VRAM)</span>{% endif %}
+                    </div>
+                  {% endfor %}
+                {% else %}
+                  <span style="color:var(--muted);">none detected — CPU-only inference</span>
+                {% endif %}
+              </td>
+            </tr>
+          </table>
+        </div>
+      </section>
+
+      <section class="message assistant" style="max-width:none;">
+        <div class="message-header">
+          <span class="role">recommendation: {{ rec.tier }}</span>
+        </div>
+        <div class="content">
+          <p><strong>{{ rec.label }}</strong></p>
+          <p style="color:var(--muted);">{{ rec.rationale }}</p>
+
+          <h3 style="margin:1rem 0 0.5rem;font-size:0.95rem;">Models</h3>
+          <ul class="model-list">
+            {% for m in rec.models %}
+              {% set s = rec.model_status[m] %}
+              <li class="model-row {{ s }}">
+                <span class="status-dot">{{ "✓" if s == "installed" else "✗" }}</span>
+                <code>{{ m }}</code>
+                <span class="status-label">{{ s }}</span>
+              </li>
+            {% endfor %}
+          </ul>
+
+          {% if rec.missing %}
+            <h3 style="margin:1rem 0 0.5rem;font-size:0.95rem;">Pull the missing ones</h3>
+            <div class="code-block">
+              <div class="code-header">
+                <span class="code-lang">SHELL</span>
+                <button type="button" class="btn ghost copy-code">📋 Copy</button>
+              </div>
+              <pre><code id="pull-cmds">{% for m in rec.missing %}ollama pull {{ m }}
+{% endfor %}</code></pre>
+            </div>
+          {% else %}
+            <p style="color:var(--assistant);">All recommended models are installed. ✓</p>
+          {% endif %}
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    // Just the copy-code handler — pulled from main.js so this page
+    // doesn't need the whole chat client.
+    document.querySelectorAll(".copy-code").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const code = btn.closest(".code-block").querySelector("pre code").textContent;
+        try { await navigator.clipboard.writeText(code); }
+        catch (_) {
+          const ta = document.createElement("textarea");
+          ta.value = code; ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.select();
+          try { document.execCommand("copy"); } catch (_) {}
+          document.body.removeChild(ta);
+        }
+        const orig = btn.textContent;
+        btn.textContent = "✓ Copied"; btn.classList.add("copied");
+        setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1200);
+      });
+    });
+  </script>
+
+  <style>
+    .hw-table { width:100%; border-collapse:collapse; }
+    .hw-table th { text-align:left; color:var(--muted); font-weight:normal;
+                   padding:0.4rem 1rem 0.4rem 0; vertical-align:top;
+                   font-size:0.8rem; text-transform:uppercase; letter-spacing:0.05em; }
+    .hw-table td { padding:0.4rem 0; }
+    .model-list { list-style:none; padding:0; margin:0; }
+    .model-row { display:flex; align-items:center; gap:0.6rem;
+                 padding:0.3rem 0; font-size:0.95rem; }
+    .model-row .status-dot { display:inline-block; width:1rem; text-align:center; }
+    .model-row.installed .status-dot { color:var(--assistant); }
+    .model-row.missing .status-dot { color:var(--warn); }
+    .model-row .status-label { color:var(--muted); font-size:0.8rem; }
+  </style>
+</body>
+</html>
