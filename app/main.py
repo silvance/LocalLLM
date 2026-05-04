@@ -306,9 +306,14 @@ with st.sidebar:
         st.session_state.max_tokens = st.number_input(
             "Max tokens (num_predict)",
             min_value=32,
-            max_value=16384,
+            max_value=32768,
             value=int(st.session_state.max_tokens),
-            step=64,
+            step=256,
+            help=(
+                "Hard cap on how many tokens the model can emit per response. "
+                "If you see code stop mid-line/mid-string, you hit this — bump it. "
+                "Long forensic / pentest scripts often need 8K-16K."
+            ),
         )
         st.session_state.num_ctx = st.number_input(
             "Context window (num_ctx)",
