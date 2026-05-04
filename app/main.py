@@ -100,7 +100,7 @@ def _init_state() -> None:
         "_chat_created_at": "",
         "model_selection": "auto",
         "use_rag": settings.rag_enabled,
-        "system_prompt": "",
+        "system_prompt": settings.default_system_prompt,
         "temperature": settings.temperature,
         "max_tokens": settings.max_tokens,
         "num_ctx": settings.num_ctx,
@@ -292,6 +292,11 @@ with st.sidebar:
         value=st.session_state.system_prompt,
         height=120,
         placeholder="e.g. You are a senior pentester. Prefer Python over bash. Cite sources.",
+        help=(
+            "Prepended as a `system` role message every turn. Defaults to a "
+            "code-fencing reminder so models wrap code in ```language … ``` "
+            "blocks instead of dumping bare prose. Edit or clear freely."
+        ),
     )
 
     with st.expander("Inference parameters"):

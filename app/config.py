@@ -62,6 +62,8 @@ class Settings:
     rag_rerank_model: str
     rag_rerank_pool: int
 
+    default_system_prompt: str
+
     @property
     def model_map(self) -> dict[str, str]:
         return {
@@ -99,4 +101,16 @@ def get_settings() -> Settings:
         rag_rerank_enabled=_get_bool("RAG_RERANK_ENABLED", False),
         rag_rerank_model=os.getenv("RAG_RERANK_MODEL", "granite4:tiny-h"),
         rag_rerank_pool=_get_int("RAG_RERANK_POOL", 20),
+
+        default_system_prompt=os.getenv(
+            "DEFAULT_SYSTEM_PROMPT",
+            # Ships with a code-fencing reminder because some models (qwen3-coder
+            # in particular) otherwise dump scripts as bare prose, which the
+            # Streamlit markdown renderer then autolinks on dotted identifiers
+            # (`self.tools` -> `[self.tools](http://self.tools)`).
+            "You are a coding assistant for security work (pentesting, digital "
+            "forensics, CTF). Always wrap code in fenced markdown blocks "
+            "(```language ... ```). Be concise; prefer working examples over "
+            "long explanations.",
+        ),
     )
