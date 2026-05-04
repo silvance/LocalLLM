@@ -85,3 +85,21 @@
   color: var(--muted);
   font-style: italic;
 }
+
+.review-section .empty-marker {
+  color: var(--warn);
+  font-style: italic;
+}
+
+.review-section .section-stats {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: monospace;
+  flex: 1;
+  text-align: right;
+  margin-right: 0.5rem;
+}
+
+.review-section .section-header {
+  gap: 0.75rem;
+}

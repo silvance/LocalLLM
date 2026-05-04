@@ -100,14 +100,14 @@
     sec.dataset.role = role;
     sec.dataset.model = model;
     sec.dataset.sectionIndex = String(index);
+    sec.dataset.startedAt = String(Date.now());
+    sec.dataset.tokenCount = "0";
     sec.innerHTML =
       `<div class="section-header">` +
         `<span class="role-label">Round ${index + 1} · ${role} · ${escapeHtml(model)}</span>` +
+        `<span class="section-stats" data-stats="">…</span>` +
         `<button type="button" class="btn ghost copy-section">📋 Copy</button>` +
       `</div>` +
-      // The "loading" marker stays until the first real chunk arrives. Gives
-      // the user feedback during the long Ollama model-swap gap between
-      // rounds (e.g. qwen unload → gemma load can be 20-30 s on an 8 GB GPU).
       `<div class="section-body section-loading" data-raw="">⏳ Loading ${escapeHtml(role)} (${escapeHtml(model)})…</div>`;
     $stream.appendChild(sec);
     currentSection = sec;
@@ -123,6 +123,14 @@
     }
     body.dataset.raw = (body.dataset.raw || "") + chunk;
     body.textContent = body.dataset.raw;  // plain text while streaming
+
+    // Live "X tokens" counter — rough word-count proxy. Better than nothing
+    // and gives the user something to look at while a slow model warms up.
+    const tokens = (body.dataset.raw.match(/\S+/g) || []).length;
+    currentSection.dataset.tokenCount = String(tokens);
+    const stats = currentSection.querySelector(".section-stats");
+    if (stats) stats.textContent = `${tokens.toLocaleString()} tokens…`;
+
     // Only auto-scroll if the user was already near the bottom — don't yank
     // them away from older sections they're trying to read.
     if (isScrolledNearBottom()) scrollToBottom();
@@ -132,7 +140,31 @@
     if (!currentSection) return;
     const body = currentSection.querySelector(".section-body");
     const raw = body.dataset.raw || "";
-    body.innerHTML = renderWithCodeBlocks(raw);
+
+    // Replace with rendered markdown OR an explicit empty marker so the
+    // user can see which sections produced no output.
+    if (!raw.trim()) {
+      body.classList.remove("section-loading");
+      body.innerHTML = '<span class="empty-marker">⚠️ (model returned no output for this section)</span>';
+    } else {
+      body.classList.remove("section-loading");
+      body.innerHTML = renderWithCodeBlocks(raw);
+    }
+
+    // Final stats: token count + elapsed seconds.
+    const tokens = parseInt(currentSection.dataset.tokenCount || "0", 10);
+    const startedAt = parseInt(currentSection.dataset.startedAt || "0", 10);
+    const elapsed = startedAt ? ((Date.now() - startedAt) / 1000).toFixed(1) : null;
+    const stats = currentSection.querySelector(".section-stats");
+    if (stats) {
+      const parts = [];
+      parts.push(`${tokens.toLocaleString()} tokens`);
+      if (elapsed) parts.push(`${elapsed}s`);
+      if (tokens > 0 && elapsed && parseFloat(elapsed) > 0) {
+        parts.push(`${(tokens / parseFloat(elapsed)).toFixed(1)} tok/s`);
+      }
+      stats.textContent = parts.join(" · ");
+    }
   }
 
   function clearStream() {
