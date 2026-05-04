@@ -40,7 +40,17 @@ from app.utils.chat_storage import (
     derive_title,
     new_session,
 )
+from app.utils.hardware_info import (
+    detect_hardware,
+    recommend_models,
+    to_dict as hw_to_dict,
+)
 from app.utils.logger import setup_logger
+from app.utils.review_storage import (
+    ReviewSection,
+    ReviewStorage,
+    new_session as new_review_session,
+)
 from app.web.job_manager import Job, JobManager
 
 
@@ -56,10 +66,12 @@ settings = get_settings()
 _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _CHATS_DIR = Path("data/chats")
+_REVIEWS_DIR = Path("data/reviews")
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 chat_service = ChatService()
 chat_storage = ChatStorage(_CHATS_DIR)
+review_storage = ReviewStorage(_REVIEWS_DIR)
 job_manager = JobManager()
 
 
@@ -379,14 +391,52 @@ REVISE_INSTRUCTION = (
 
 @app.get("/review", response_class=HTMLResponse)
 async def review_page(request: Request):
+    return _render_review_page(request, loaded=None)
+
+
+@app.get("/review/{review_id}", response_class=HTMLResponse)
+async def review_load_page(review_id: str, request: Request):
+    session = review_storage.load(review_id)
+    if session is None:
+        raise HTTPException(404, f"review {review_id} not found")
+    return _render_review_page(request, loaded=session)
+
+
+def _render_review_page(request: Request, loaded) -> HTMLResponse:
+    summaries = review_storage.list_summaries()
     return templates.TemplateResponse(
         request,
         "review.html",
         {
             "settings": settings,
             "model_options": ["auto", "granite", "gemma", "qwen"],
+            "summaries": summaries,
+            "loaded": loaded,
+            "loaded_dict": (
+                {
+                    "id": loaded.id,
+                    "title": loaded.title,
+                    "prompt": loaded.prompt,
+                    "writer_model": loaded.writer_model,
+                    "reviewer_model": loaded.reviewer_model,
+                    "rounds": loaded.rounds,
+                    "status": loaded.status,
+                    "sections": [
+                        {"role": s.role, "model": s.model, "text": s.text}
+                        for s in loaded.sections
+                    ],
+                }
+                if loaded is not None
+                else None
+            ),
         },
     )
+
+
+@app.delete("/review/{review_id}")
+async def delete_review(review_id: str) -> JSONResponse:
+    review_storage.delete(review_id)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/review")
@@ -415,10 +465,16 @@ async def start_review(request: Request) -> JSONResponse:
     max_tokens = body.get("max_tokens")
     num_ctx = body.get("num_ctx")
 
+    # Create the persisted review session up front so it shows up in the
+    # sidebar immediately. The runner thread updates it as sections complete.
+    review_session = new_review_session(prompt, writer_model, reviewer_model, rounds)
+    review_storage.save(review_session)
+
     job = job_manager.create(
-        chat_id=f"review-{int(asyncio.get_running_loop().time())}",
+        chat_id=f"review-{review_session.id}",
         request_data={
             "kind": "review",
+            "review_id": review_session.id,
             "writer_model": writer_model,
             "reviewer_model": reviewer_model,
             "rounds": rounds,
@@ -428,6 +484,7 @@ async def start_review(request: Request) -> JSONResponse:
     loop = asyncio.get_running_loop()
     _start_review_thread(
         job=job,
+        review_id=review_session.id,
         prompt=prompt,
         writer_model=writer_model,
         reviewer_model=reviewer_model,
@@ -438,12 +495,13 @@ async def start_review(request: Request) -> JSONResponse:
         num_ctx=num_ctx,
         loop=loop,
     )
-    return JSONResponse({"job_id": job.id})
+    return JSONResponse({"job_id": job.id, "review_id": review_session.id})
 
 
 def _start_review_thread(
     *,
     job: Job,
+    review_id: str,
     prompt: str,
     writer_model: str,
     reviewer_model: str,
@@ -454,6 +512,22 @@ def _start_review_thread(
     num_ctx: int | None,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
+    def _persist(status: str) -> None:
+        """Save the current sections list to disk under the review session
+        we created upfront. Idempotent — overwrites the file each time."""
+        try:
+            session = review_storage.load(review_id)
+            if session is None:
+                return
+            session.status = status
+            session.sections = [
+                ReviewSection(role=s["role"], model=s["model"], text=s["text"])
+                for s in sections
+            ]
+            review_storage.save(session)
+        except Exception:
+            logger.exception("Failed to persist review %s", review_id)
+
     def _runner() -> None:
         sections: list[dict] = []
 
@@ -528,13 +602,15 @@ def _start_review_thread(
                     text = run_section(role="reviewer", model=reviewer_model, messages=msgs)
                     sections.append({"role": "reviewer", "model": reviewer_model, "text": text})
 
+            _persist("done")
             job_manager.finish(
                 job.id,
                 "done",
                 loop,
-                metadata={"kind": "review", "sections": sections},
+                metadata={"kind": "review", "sections": sections, "review_id": review_id},
             )
         except _StopRequested as stop:
+            _persist("stopped")
             job_manager.finish(
                 job.id,
                 "stopped",
@@ -542,17 +618,19 @@ def _start_review_thread(
                 metadata={
                     "kind": "review",
                     "sections": sections,
+                    "review_id": review_id,
                     "stopped_during": stop.model,
                 },
             )
         except Exception as exc:
             logger.exception("Review job %s failed", job.id)
+            _persist("error")
             job_manager.finish(
                 job.id,
                 "error",
                 loop,
                 error=str(exc),
-                metadata={"kind": "review", "sections": sections},
+                metadata={"kind": "review", "sections": sections, "review_id": review_id},
             )
 
     threading.Thread(target=_runner, daemon=True, name=f"review-{job.id[:8]}").start()
@@ -561,3 +639,44 @@ def _start_review_thread(
 class _StopRequested(Exception):
     def __init__(self, model: str) -> None:
         self.model = model
+
+
+# ---------------------------------------------------------------------------
+# Hardware detection + model recommendation
+# ---------------------------------------------------------------------------
+
+def _ollama_installed_models() -> list[str]:
+    """Names of models present in the user's Ollama. Reuses the chat_service
+    client so we go through the same configured OLLAMA_HOST."""
+    try:
+        resp = chat_service.adapters["granite"].client.list()
+    except Exception:
+        return []
+    names: list[str] = []
+    for entry in resp.get("models", []):
+        n = entry.get("name") or entry.get("model")
+        if n:
+            names.append(n)
+    return names
+
+
+@app.get("/hardware", response_class=HTMLResponse)
+async def hardware_page(request: Request):
+    hw = detect_hardware()
+    rec = recommend_models(hw)
+    payload = hw_to_dict(hw, rec, installed=_ollama_installed_models())
+    return templates.TemplateResponse(
+        request,
+        "hardware.html",
+        {
+            "hw": payload["hardware"],
+            "rec": payload["recommendation"],
+        },
+    )
+
+
+@app.get("/api/hardware")
+async def hardware_api() -> JSONResponse:
+    hw = detect_hardware()
+    rec = recommend_models(hw)
+    return JSONResponse(hw_to_dict(hw, rec, installed=_ollama_installed_models()))

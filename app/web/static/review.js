@@ -79,6 +79,10 @@
     });
   }
 
+  function isScrolledNearBottom() {
+    return $stream.scrollHeight - $stream.scrollTop - $stream.clientHeight < 120;
+  }
+
   // ---- Section rendering ----
 
   function appendSection(index, role, model) {
@@ -94,7 +98,10 @@
         `<span class="role-label">Round ${index + 1} · ${role} · ${escapeHtml(model)}</span>` +
         `<button type="button" class="btn ghost copy-section">📋 Copy</button>` +
       `</div>` +
-      `<div class="section-body" data-raw=""></div>`;
+      // The "loading" marker stays until the first real chunk arrives. Gives
+      // the user feedback during the long Ollama model-swap gap between
+      // rounds (e.g. qwen unload → gemma load can be 20-30 s on an 8 GB GPU).
+      `<div class="section-body section-loading" data-raw="">⏳ Loading ${escapeHtml(role)} (${escapeHtml(model)})…</div>`;
     $stream.appendChild(sec);
     currentSection = sec;
     scrollToBottom();
@@ -103,9 +110,15 @@
   function appendChunkToCurrent(chunk) {
     if (!currentSection) return;
     const body = currentSection.querySelector(".section-body");
+    if (body.classList.contains("section-loading")) {
+      body.classList.remove("section-loading");
+      body.textContent = "";
+    }
     body.dataset.raw = (body.dataset.raw || "") + chunk;
     body.textContent = body.dataset.raw;  // plain text while streaming
-    scrollToBottom();
+    // Only auto-scroll if the user was already near the bottom — don't yank
+    // them away from older sections they're trying to read.
+    if (isScrolledNearBottom()) scrollToBottom();
   }
 
   function finalizePrevious() {
@@ -222,4 +235,36 @@
       startReview();
     }
   });
+
+  // Delete a saved review from the sidebar list.
+  document.querySelectorAll(".del-review").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const rid = btn.dataset.reviewId;
+      if (!confirm("Delete this review?")) return;
+      try {
+        await fetch(`/review/${rid}`, { method: "DELETE" });
+        // If we were viewing it, jump back to /review (clean slate)
+        if (window.location.pathname.endsWith(`/review/${rid}`)) {
+          window.location.href = "/review";
+        } else {
+          btn.closest(".chat-row").remove();
+        }
+      } catch (err) {
+        console.warn("delete failed", err);
+      }
+    });
+  });
+
+  // If we're viewing a saved review (sections rendered server-side), hydrate
+  // them with code-block rendering and don't try to start a new generation.
+  function hydrateSavedSections() {
+    document.querySelectorAll("#review-stream .review-section").forEach(sec => {
+      const body = sec.querySelector(".section-body");
+      const raw = body.dataset.raw || body.textContent;
+      body.dataset.raw = raw;
+      body.innerHTML = renderWithCodeBlocks(raw);
+    });
+  }
+
+  hydrateSavedSections();
 })();

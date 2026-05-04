@@ -80,3 +80,8 @@
 .review-section .section-body .code-block {
   margin: 0.6rem 0;
 }
+
+.review-section .section-loading {
+  color: var(--muted);
+  font-style: italic;
+}

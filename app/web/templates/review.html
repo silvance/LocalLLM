@@ -11,7 +11,27 @@
     <header>
       <h1>LocalLLM</h1>
       <a href="/" class="btn ghost block" style="margin-top:0.5rem;text-align:center;text-decoration:none;">← Back to chat</a>
+      <a href="/hardware" class="btn ghost block" style="margin-top:0.4rem;text-align:center;text-decoration:none;">🖥 Hardware</a>
     </header>
+
+    <section class="sessions">
+      <a href="/review" class="btn primary block" style="display:block;text-align:center;text-decoration:none;">+ New review</a>
+      <ul class="chat-list">
+        {% for s in summaries %}
+          <li class="chat-row {% if loaded and s.id == loaded.id %}active{% endif %}">
+            <a href="/review/{{ s.id }}" class="chat-link" title="{{ s.title }}">
+              {{ s.title }}
+              <span class="count">{{ s.rounds }}r</span>
+            </a>
+            <button
+              type="button"
+              class="btn ghost del-review"
+              data-review-id="{{ s.id }}"
+              title="Delete this review">✕</button>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
 
     <section class="settings">
       <h2>Roles</h2>
@@ -19,7 +39,7 @@
         Writer model
         <select id="writer-model">
           {% for m in model_options %}
-            <option value="{{ m }}" {% if m == "qwen" %}selected{% endif %}>{{ m }}</option>
+            <option value="{{ m }}" {% if (loaded and m == loaded.writer_model) or (not loaded and m == "qwen") %}selected{% endif %}>{{ m }}</option>
           {% endfor %}
         </select>
       </label>
@@ -27,32 +47,29 @@
         Reviewer model
         <select id="reviewer-model">
           {% for m in model_options %}
-            <option value="{{ m }}" {% if m == "gemma" %}selected{% endif %}>{{ m }}</option>
+            <option value="{{ m }}" {% if (loaded and m == loaded.reviewer_model) or (not loaded and m == "gemma") %}selected{% endif %}>{{ m }}</option>
           {% endfor %}
         </select>
       </label>
       <label>
-        Rounds (2 = write+review only; 3 = + revise; 4+ = keep going)
-        <input type="number" id="rounds" min="2" max="6" value="3">
+        Rounds
+        <input type="number" id="rounds" min="2" max="6" value="{{ loaded.rounds if loaded else 3 }}">
       </label>
 
       <h2>Settings</h2>
       <label>
         System prompt (optional)
-        <textarea id="system-prompt" rows="5" placeholder="Leave empty to use the default coding-assistant prompt."></textarea>
+        <textarea id="system-prompt" rows="5" placeholder="Leave empty to use the default."></textarea>
       </label>
       <details>
         <summary>Inference parameters</summary>
-        <label>
-          Temperature
+        <label>Temperature
           <input type="number" id="temperature" step="0.05" min="0" max="2" value="{{ settings.temperature }}">
         </label>
-        <label>
-          Max tokens
+        <label>Max tokens
           <input type="number" id="max-tokens" step="256" min="32" max="32768" value="{{ settings.max_tokens }}">
         </label>
-        <label>
-          num_ctx
+        <label>num_ctx
           <input type="number" id="num-ctx" step="2048" min="2048" max="262144" value="{{ settings.num_ctx }}">
         </label>
       </details>
@@ -61,18 +78,32 @@
 
   <main class="chat">
     <div class="review-prompt">
-      <label for="review-prompt-input">Initial prompt</label>
+      <label for="review-prompt-input">Initial prompt {% if loaded %}<span style="color:var(--muted);font-weight:normal;">(read-only — start a new review to edit)</span>{% endif %}</label>
       <textarea
         id="review-prompt-input"
         rows="6"
-        placeholder="Describe what you want built. The writer model produces it, the reviewer critiques, then the writer revises."></textarea>
+        {% if loaded %}readonly{% endif %}
+        placeholder="Describe what you want built. The writer model produces it, the reviewer critiques, then the writer revises.">{% if loaded %}{{ loaded.prompt }}{% endif %}</textarea>
       <div class="review-actions">
-        <button type="button" id="run-review" class="btn primary">▶ Run review</button>
+        <button type="button" id="run-review" class="btn primary" {% if loaded %}disabled{% endif %}>▶ Run review</button>
         <button type="button" id="stop-review" class="btn warn hidden">⏹ Stop</button>
+        {% if loaded %}<span style="color:var(--muted);font-size:0.85rem;align-self:center;">Status: {{ loaded.status }}</span>{% endif %}
       </div>
     </div>
 
-    <div id="review-stream" class="review-stream"></div>
+    <div id="review-stream" class="review-stream">
+      {% if loaded_dict %}
+        {% for sec in loaded_dict.sections %}
+          <div class="review-section role-{{ sec.role }}" data-role="{{ sec.role }}" data-model="{{ sec.model }}">
+            <div class="section-header">
+              <span class="role-label">Round {{ loop.index }} · {{ sec.role }} · {{ sec.model }}</span>
+              <button type="button" class="btn ghost copy-section">📋 Copy</button>
+            </div>
+            <div class="section-body" data-raw="{{ sec.text }}">{{ sec.text }}</div>
+          </div>
+        {% endfor %}
+      {% endif %}
+    </div>
   </main>
 
   <script src="/static/review.js"></script>
