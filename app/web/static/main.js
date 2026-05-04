@@ -25,7 +25,15 @@
   let activeSource = null;
 
   function scrollToBottom() {
-    $messages.scrollTop = $messages.scrollHeight;
+    // Defer one frame so the just-appended node is laid out before we
+    // measure scrollHeight (otherwise the scroll lags by one update).
+    requestAnimationFrame(() => {
+      $messages.scrollTop = $messages.scrollHeight;
+    });
+  }
+
+  function isScrolledNearBottom() {
+    return $messages.scrollHeight - $messages.scrollTop - $messages.clientHeight < 80;
   }
 
   function appendMessage(role, content) {
@@ -39,7 +47,8 @@
   }
 
   function showStreaming() {
-    $streamingContent.textContent = "";
+    $streamingContent.textContent = "Waiting for first token…";
+    $streamingContent.classList.add("placeholder");
     $streamingMeta.classList.add("hidden");
     $streamingMeta.textContent = "";
     $streaming.classList.remove("hidden");
@@ -96,8 +105,14 @@
       try {
         const data = JSON.parse(e.data);
         if (data.chunk) {
+          // Drop placeholder on first real token.
+          if ($streamingContent.classList.contains("placeholder")) {
+            $streamingContent.textContent = "";
+            $streamingContent.classList.remove("placeholder");
+          }
+          const wasNearBottom = isScrolledNearBottom();
           $streamingContent.textContent += data.chunk;
-          scrollToBottom();
+          if (wasNearBottom) scrollToBottom();
         }
       } catch (err) {
         console.warn("token parse error", err, e.data);
