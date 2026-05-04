@@ -62,3 +62,21 @@ def test_no_longer_overfires_on_generic_words(router: ModelRouter, prompt: str) 
     assert decision.selected_model != "qwen", (
         f"unexpectedly routed to qwen; reason: {decision.reason}"
     )
+
+
+@pytest.mark.parametrize("prompt", [
+    "build me a digital forensics tool",
+    "write a script that parses windows event logs",
+    "I need a small program to extract strings from a PE file",
+    "give me a YARA rule that matches on this section",
+    "create a payload that bypasses AMSI",
+    "Show me a port scanner using scapy",
+])
+def test_pentest_forensic_phrases_route_to_qwen(router: ModelRouter, prompt: str) -> None:
+    """Coding-task nouns (tool/script/program/scanner/payload/yara, etc.)
+    should pull these into qwen so the user gets code, not a refusal from
+    the small generalist."""
+    decision = router.route(make_request(prompt))
+    assert decision.selected_model == "qwen", (
+        f"expected qwen, got {decision.selected_model}; reason: {decision.reason}"
+    )
