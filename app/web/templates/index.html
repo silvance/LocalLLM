@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LocalLLM</title>
+  <link rel="stylesheet" href="/static/main.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <header>
+      <h1>LocalLLM</h1>
+    </header>
+
+    <section class="sessions">
+      <form action="/chats" method="post">
+        <button type="submit" class="btn primary block">+ New chat</button>
+      </form>
+      <ul class="chat-list">
+        {% for s in summaries %}
+          <li class="chat-row {% if s.id == chat.id %}active{% endif %}">
+            <a href="/chats/{{ s.id }}" class="chat-link" title="{{ s.title }}">
+              {{ s.title }}
+              <span class="count">{{ s.message_count }}</span>
+            </a>
+            <button
+              type="button"
+              class="btn ghost del"
+              data-chat-id="{{ s.id }}"
+              title="Delete this chat">
+              ✕
+            </button>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    <section class="settings">
+      <h2>Settings</h2>
+      <label>
+        Model
+        <select id="model-selection">
+          {% for m in model_options %}
+            <option value="{{ m }}" {% if m == settings.default_model %}selected{% endif %}>
+              {{ m }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="checkbox">
+        <input type="checkbox" id="use-rag" {% if settings.rag_enabled %}checked{% endif %}>
+        Use RAG
+      </label>
+
+      <label>
+        System prompt
+        <textarea id="system-prompt" rows="5">{{ settings.default_system_prompt }}</textarea>
+      </label>
+
+      <details>
+        <summary>Inference parameters</summary>
+        <label>
+          Temperature
+          <input type="number" id="temperature" step="0.05" min="0" max="2" value="{{ settings.temperature }}">
+        </label>
+        <label>
+          Max tokens
+          <input type="number" id="max-tokens" step="256" min="32" max="32768" value="{{ settings.max_tokens }}">
+        </label>
+        <label>
+          num_ctx
+          <input type="number" id="num-ctx" step="2048" min="2048" max="262144" value="{{ settings.num_ctx }}">
+        </label>
+      </details>
+    </section>
+  </aside>
+
+  <main class="chat">
+    <div id="messages" class="messages">
+      {% for msg in chat.messages %}
+        <div class="message {{ msg.role }}">
+          <div class="role">{{ msg.role }}</div>
+          <div class="content">{{ msg.content }}</div>
+        </div>
+      {% endfor %}
+    </div>
+
+    <div id="streaming" class="message assistant streaming hidden">
+      <div class="role">assistant</div>
+      <div class="meta hidden"></div>
+      <div class="content"></div>
+      <div class="actions">
+        <button type="button" class="btn warn" id="stop-btn">⏹ Stop</button>
+      </div>
+    </div>
+
+    <form id="send-form" class="composer">
+      <textarea
+        id="composer-input"
+        name="content"
+        placeholder="Send a message…  (Enter to send, Shift+Enter for newline)"
+        rows="3"
+        required></textarea>
+      <button type="submit" class="btn primary">Send</button>
+    </form>
+  </main>
+
+  <script>
+    window.LOCALLLM = {
+      chatId: {{ chat.id | tojson }},
+      activeJobId: {{ active_job_id | tojson }},
+    };
+  </script>
+  <script src="/static/main.js"></script>
+</body>
+</html>
