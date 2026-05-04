@@ -30,6 +30,11 @@ sneakernet:
    - Create `LocalLLM\.venv\` and `pip install` from the bundled wheels (offline)
    - Copy `.env.example` → `.env` if there's no existing config
 4. **Open a fresh shell** (so the new PATH applies), then `start.bat`.
+   The default UI is the FastAPI app at <http://127.0.0.1:8000>.
+   Pass `--streamlit` for the legacy UI:
+   ```
+   start.bat --streamlit
+   ```
 
 > Note: after `install.bat` runs, `verify.ps1` will report mismatches in `LocalLLM/.venv/` and `LocalLLM/__pycache__/` directories — that's expected (those didn't exist at build time). To re-verify the originally-shipped files, run `verify.ps1` only on a fresh extraction of the bundle.
 
