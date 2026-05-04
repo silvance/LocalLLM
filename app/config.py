@@ -88,7 +88,7 @@ def get_settings() -> Settings:
 
         default_stream=_get_bool("DEFAULT_STREAM", True),
         temperature=_get_float("TEMPERATURE", 0.2),
-        max_tokens=_get_int("MAX_TOKENS", 1024),
+        max_tokens=_get_int("MAX_TOKENS", 8192),
         num_ctx=_get_int("NUM_CTX", 32768),
 
         rag_enabled=_get_bool("RAG_ENABLED", False),
