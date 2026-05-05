@@ -40,6 +40,7 @@ from app.utils.chat_storage import (
     derive_title,
     new_session,
 )
+from app.utils.code_linter import lint_writer_output
 from app.utils.hardware_info import (
     detect_hardware,
     recommend_models,
@@ -566,13 +567,43 @@ def _start_review_thread(
             )
             execution = chat_service.stream_chat(request=req, selection=model, use_rag=False)
             collected: list[str] = []
+            chunks_since_lint = 0
+            # Lint the writer's output every ~30 chunks (≈30 tokens). Cheap
+            # (pyflakes is milliseconds) and doesn't block streaming since we
+            # already run in a producer thread.
+            LINT_INTERVAL_CHUNKS = 30
+
             for chunk in execution.stream:
                 if job_manager.is_stop_requested(job.id):
                     raise _StopRequested(execution.selected_model)
                 if chunk.content:
                     collected.append(chunk.content)
                     job_manager.append_chunk(job.id, chunk.content, loop)
+
+                    if role == "writer":
+                        chunks_since_lint += 1
+                        if chunks_since_lint >= LINT_INTERVAL_CHUNKS:
+                            chunks_since_lint = 0
+                            _emit_lint(section_idx, "".join(collected))
+
+            # One last lint pass after the section completes so the panel
+            # reflects the final state (and not an interval-old snapshot).
+            if role == "writer":
+                _emit_lint(section_idx, "".join(collected))
             return "".join(collected)
+
+        def _emit_lint(section_index: int, text: str) -> None:
+            try:
+                findings = lint_writer_output(text)
+            except Exception:
+                logger.exception("Lint pass failed (skipping)")
+                return
+            job_manager.emit_event(
+                job.id,
+                "lint_state",
+                {"section_index": section_index, "findings": findings},
+                loop,
+            )
 
         def base_messages() -> list[ChatMessage]:
             msgs: list[ChatMessage] = []

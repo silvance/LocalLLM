@@ -74,6 +74,51 @@
     setTimeout(() => { btn.textContent = o; btn.classList.remove("copied"); }, 1200);
   }
 
+  // ---- Lint panel (live pyflakes findings keyed by section index) ----
+
+  function updateLintPanel(sectionIdx, findings) {
+    const sec = $stream.querySelector(
+      `.review-section[data-section-index="${sectionIdx}"]`
+    );
+    if (!sec) return;
+
+    let panel = sec.querySelector(".lint-panel");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.className = "lint-panel";
+      sec.appendChild(panel);
+    }
+
+    if (!findings || findings.length === 0) {
+      panel.innerHTML = '<div class="lint-summary clean">✅ Lint: clean (no issues)</div>';
+      return;
+    }
+
+    let errors = 0, warnings = 0;
+    for (const f of findings) {
+      if (f.severity === "error") errors++;
+      else warnings++;
+    }
+    const summary = errors > 0
+      ? `❌ Lint: ${errors} error${errors !== 1 ? "s" : ""}, ${warnings} warning${warnings !== 1 ? "s" : ""}`
+      : `⚠️ Lint: ${warnings} warning${warnings !== 1 ? "s" : ""}`;
+    const summaryClass = errors > 0 ? "has-errors" : "has-warnings";
+
+    const items = findings.map(f => {
+      const loc = `B${(f.block ?? 0) + 1}:L${f.line}`;
+      return `<li class="lint-item ${escapeHtml(f.severity)}">` +
+               `<span class="lint-loc">${escapeHtml(loc)}</span>` +
+               `<span class="lint-msg">${escapeHtml(f.message)}</span>` +
+             `</li>`;
+    }).join("");
+
+    panel.innerHTML =
+      `<details open>` +
+        `<summary class="lint-summary ${summaryClass}">${summary}</summary>` +
+        `<ul class="lint-list">${items}</ul>` +
+      `</details>`;
+  }
+
   // ---- Line diff (LCS-based, ~O(m*n) — fine for typical code length) ----
 
   function computeLineDiff(oldText, newText) {
@@ -342,6 +387,13 @@
         const d = JSON.parse(e.data);
         if (d.chunk) appendChunkToCurrent(d.chunk);
       } catch (err) { console.warn("token parse", err); }
+    });
+
+    src.addEventListener("lint_state", (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        updateLintPanel(d.section_index, d.findings || []);
+      } catch (err) { console.warn("lint_state parse", err); }
     });
 
     src.addEventListener("done", (e) => {
