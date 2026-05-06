@@ -5,7 +5,11 @@ pyyaml==6.0.1
 chromadb==1.5.8
 rank-bm25==0.2.2
 fastapi==0.115.4
-uvicorn[standard]==0.32.0
+# NOTE: plain `uvicorn`, NOT `uvicorn[standard]`. The `[standard]` extras
+# pull in `uvloop`, which only ships wheels for Linux/macOS — `pip download
+# --platform win_amd64` (used by build_bundle.py) fails to find a candidate
+# for it. The extras are nice-to-have but not required for our use case.
+uvicorn==0.32.0
 jinja2==3.1.4
 python-multipart==0.0.20
 psutil==7.2.2

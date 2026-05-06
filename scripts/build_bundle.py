@@ -180,22 +180,188 @@ def copy_ollama_models(models: list[str], models_dir: Path, dst_root: Path) -> d
 
 
 def download_python_wheels(dst_root: Path, platform_tag: str, py_version: str) -> int:
+    """Download wheels for the bundle's target platform.
+
+    `pip download --platform X` doesn't evaluate environment markers in the
+    target platform's context — it uses the host's environment for marker
+    evaluation. That breaks transitive deps like uvloop, which has marker
+    `sys_platform != "win32" and extra == "standard"`: chromadb requires
+    `uvicorn[standard]`, which on a Linux host evaluates the marker as TRUE
+    even when targeting Windows, and the resolver fails because uvloop has
+    no Windows wheel.
+
+    Workaround: walk the dep tree ourselves with `pip download --no-deps`,
+    parse each wheel's METADATA, and evaluate `Requires-Dist` markers with
+    `sys_platform="win32"` (or whatever the target is) so transitive deps
+    that genuinely don't apply to the target platform are skipped.
+    """
     dst = dst_root / "wheels"
     dst.mkdir(parents=True, exist_ok=True)
     requirements = REPO_ROOT / "requirements.txt"
-    cmd = [
-        sys.executable, "-m", "pip", "download",
-        "-r", str(requirements),
-        "-d", str(dst),
-        "--platform", platform_tag,
-        "--python-version", py_version,
-        "--only-binary=:all:",
-    ]
-    print(f"  $ {' '.join(cmd)}")
-    subprocess.check_call(cmd)
+
+    target_env = _target_marker_env(platform_tag, py_version)
+
+    seen: set[str] = set()
+    queue: list[tuple[str, frozenset[str]]] = []
+
+    # Seed the queue from requirements.txt (top-level specs, with their extras).
+    for raw_line in requirements.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        spec, extras = _split_extras(line)
+        queue.append((spec, extras))
+
+    print(f"  resolving wheels for {platform_tag} (env-marker aware)...")
+    while queue:
+        spec, requested_extras = queue.pop(0)
+        base_name = _normalize_name(_strip_specifier(spec))
+        if not base_name or base_name in seen:
+            continue
+        seen.add(base_name)
+
+        # Download this package only (no deps). pip download still does
+        # platform-tag matching, so a package with no win_amd64 wheel will
+        # legitimately fail here — and that's the right behaviour.
+        cmd = [
+            sys.executable, "-m", "pip", "download", spec,
+            "--no-deps",
+            "-d", str(dst),
+            "--platform", platform_tag,
+            "--python-version", py_version,
+            "--only-binary=:all:",
+        ]
+        try:
+            subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as exc:
+            # If the failure is "no compatible wheel" AND no extras requested
+            # us specifically, treat it as a legitimate skip (e.g. uvloop on Windows).
+            print(f"    skipping {spec}: no compatible wheel for {platform_tag}")
+            continue
+
+        # Crack the just-downloaded wheel's METADATA to find its Requires-Dist
+        # entries. Filter them by target-platform markers and requested extras.
+        for req_spec, req_extras in _wheel_requirements(dst, base_name, requested_extras, target_env):
+            queue.append((req_spec, req_extras))
+
     n_wheels = len(list(dst.glob("*.whl")))
     print(f"  downloaded {n_wheels} wheel(s) for {platform_tag}")
     return n_wheels
+
+
+# --- wheel resolver helpers ------------------------------------------------
+
+import re as _re
+import zipfile as _zipfile
+
+
+_SPECIFIER_RE = _re.compile(r"^([A-Za-z0-9_.\-]+)")
+_EXTRAS_RE = _re.compile(r"\[([^\]]+)\]")
+
+
+def _normalize_name(name: str) -> str:
+    return _re.sub(r"[-_.]+", "-", name.strip()).lower()
+
+
+def _strip_specifier(spec: str) -> str:
+    """'uvicorn[standard]>=0.18.3' -> 'uvicorn'."""
+    spec = spec.strip()
+    spec = _re.sub(r";.*$", "", spec).strip()  # drop env marker
+    spec = _EXTRAS_RE.sub("", spec).strip()    # drop extras
+    m = _SPECIFIER_RE.match(spec)
+    return m.group(1) if m else ""
+
+
+def _split_extras(spec: str) -> tuple[str, frozenset[str]]:
+    """Split a requirement spec into (cleaned_spec, extras_set)."""
+    spec = spec.strip()
+    extras_match = _EXTRAS_RE.search(spec)
+    if not extras_match:
+        return spec, frozenset()
+    extras = frozenset(e.strip() for e in extras_match.group(1).split(",") if e.strip())
+    cleaned = _EXTRAS_RE.sub("", spec, count=1)
+    return cleaned, extras
+
+
+def _target_marker_env(platform_tag: str, py_version: str) -> dict:
+    """Build a marker-evaluation environment as if we were the target."""
+    sys_platform = "win32" if platform_tag.startswith("win") else "linux"
+    platform_system = "Windows" if sys_platform == "win32" else "Linux"
+    return {
+        "sys_platform": sys_platform,
+        "platform_system": platform_system,
+        "platform_python_implementation": "CPython",
+        "implementation_name": "cpython",
+        "python_version": py_version,
+        "python_full_version": py_version + ".0",
+        "os_name": "nt" if sys_platform == "win32" else "posix",
+    }
+
+
+def _wheel_requirements(
+    wheel_dir: Path,
+    base_name: str,
+    requested_extras: frozenset[str],
+    target_env: dict,
+) -> list[tuple[str, frozenset[str]]]:
+    """Parse the wheel's METADATA Requires-Dist lines and return the deps
+    that apply for our target platform + requested extras."""
+    candidates = sorted(wheel_dir.glob(f"{base_name.replace('-', '_')}*.whl"))
+    if not candidates:
+        candidates = sorted(wheel_dir.glob(f"{base_name}*.whl"))
+    if not candidates:
+        return []
+
+    try:
+        with _zipfile.ZipFile(candidates[-1]) as z:
+            meta_name = next(
+                (n for n in z.namelist() if n.endswith(".dist-info/METADATA")), None
+            )
+            if meta_name is None:
+                return []
+            meta = z.read(meta_name).decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    try:
+        from packaging.markers import Marker, InvalidMarker
+        from packaging.requirements import Requirement, InvalidRequirement
+    except ImportError:
+        # packaging is in pip's deps and almost always present, but if not
+        # we conservatively include all deps (better to fail loudly later).
+        return []
+
+    out: list[tuple[str, frozenset[str]]] = []
+    for line in meta.splitlines():
+        if not line.lower().startswith("requires-dist:"):
+            continue
+        spec = line.split(":", 1)[1].strip()
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
+            continue
+        # Evaluate the marker with each requested-extra. If the dep applies
+        # for the empty extra OR for any of our requested extras, queue it.
+        if req.marker is None:
+            applies = True
+        else:
+            extras_to_try = list(requested_extras) + [""]
+            applies = False
+            for x in extras_to_try:
+                env = dict(target_env, extra=x)
+                try:
+                    if req.marker.evaluate(env):
+                        applies = True
+                        break
+                except Exception:
+                    applies = True
+                    break
+        if not applies:
+            continue
+        # Re-emit with the dep's own extras preserved (so e.g. if chromadb
+        # asks for uvicorn[standard], we propagate {"standard"}).
+        out.append((str(req), frozenset(req.extras or [])))
+    return out
 
 
 def copy_templates(dst_root: Path) -> None:
