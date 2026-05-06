@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LocalLLM — Agent</title>
+  <link rel="stylesheet" href="/static/main.css">
+  <link rel="stylesheet" href="/agent-static/agent.css">
+</head>
+<body class="agent-page">
+  <aside class="sidebar">
+    <header>
+      <h1>LocalLLM</h1>
+      <a href="/" class="btn ghost block" style="margin-top:0.5rem;text-align:center;text-decoration:none;">← Back to chat</a>
+      <a href="/review" class="btn ghost block" style="margin-top:0.4rem;text-align:center;text-decoration:none;">⚖ Review</a>
+      <a href="/hardware" class="btn ghost block" style="margin-top:0.4rem;text-align:center;text-decoration:none;">🖥 Hardware</a>
+    </header>
+
+    <section class="settings">
+      <h2>Agent settings</h2>
+      <label>
+        Model
+        <select id="agent-model">
+          {% for m in model_options %}
+            <option value="{{ m }}" {% if m == "granite" %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <p class="muted-note">
+        granite4 is the default — its tool-calling is reliable.
+        qwen3-coder also works but is slow on the swap-heavy agent loop.
+      </p>
+
+      <h2>Network</h2>
+      <p class="muted-note">
+        This page reaches DuckDuckGo and arbitrary URLs you ask it to fetch.
+        It is intentionally <strong>excluded from the airgap bundle</strong>
+        — only available on this dev host.
+      </p>
+    </section>
+  </aside>
+
+  <main class="agent">
+    <div class="agent-prompt">
+      <label for="agent-prompt-input">Research prompt</label>
+      <textarea
+        id="agent-prompt-input"
+        rows="5"
+        placeholder="e.g. What's the current state of CVE-2024-XXXX, and which Linux distros have patched it?"></textarea>
+      <div class="agent-actions">
+        <button type="button" id="run-agent" class="btn primary">▶ Run</button>
+        <span id="agent-status" class="muted-note"></span>
+      </div>
+    </div>
+
+    <div id="agent-stream" class="agent-stream"></div>
+  </main>
+
+  <script src="/agent-static/agent.js"></script>
+</body>
+</html>
