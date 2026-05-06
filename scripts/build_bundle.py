@@ -43,6 +43,10 @@ APP_IGNORE = shutil.ignore_patterns(
     ".vscode", ".idea",
     "data", "logs", "dist", "node_modules",
     ".env",  # never bundle the local .env (operator copies .env.example)
+    # Online-only agent variant: never goes onto the airgap target.
+    # Excluding the directory keeps internet-tool code paths off-disk
+    # entirely on the airgap deploy — no inert attack surface.
+    "agent",
 )
 
 # Files (relative to bundle root) that exist for verification meta — skip

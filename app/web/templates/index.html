@@ -17,6 +17,9 @@
       </form>
       <a href="/review" class="btn block ghost" style="display:block;text-align:center;text-decoration:none;margin-top:0.4rem;">⚖ Review (2-AI)</a>
       <a href="/hardware" class="btn block ghost" style="display:block;text-align:center;text-decoration:none;margin-top:0.4rem;">🖥 Hardware &amp; models</a>
+      {% if agent_enabled %}
+      <a href="/agent" class="btn block ghost" style="display:block;text-align:center;text-decoration:none;margin-top:0.4rem;">🌐 Agent (online)</a>
+      {% endif %}
       <button type="button" id="copy-chat-btn" class="btn block ghost">📋 Copy whole chat</button>
       <ul class="chat-list">
         {% for s in summaries %}

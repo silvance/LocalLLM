@@ -1,0 +1,12 @@
+# Optional dependencies for the online-connected /agent page.
+#
+#   pip install -r requirements-agent.txt
+#
+# These are intentionally NOT in requirements.txt because the airgap
+# bundle should never need them — build_bundle.py also excludes the
+# app/agent/ directory itself, so a tampered airgap install can't
+# silently invoke web tools.
+
+ddgs==9.14.2          # DuckDuckGo search (no API key)
+httpx==0.28.1         # HTTP client used by the fetch tool
+trafilatura==2.0.0    # HTML -> clean text extraction

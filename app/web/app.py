@@ -79,6 +79,22 @@ job_manager = JobManager()
 app = FastAPI(title="LocalLLM")
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
+# Online agent variant — only present when app/agent/ is on disk. The
+# airgap bundle excludes that directory, so this try-import quietly
+# becomes a no-op there. Locally, it adds the /agent page + /api/agent.
+_agent_enabled = False
+try:
+    from app.agent.routes import agent_static, router as agent_router
+    app.include_router(agent_router)
+    app.mount("/agent-static", agent_static, name="agent-static")
+    _agent_enabled = True
+except ImportError:
+    pass
+
+
+def is_agent_enabled() -> bool:
+    return _agent_enabled
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -211,6 +227,7 @@ async def chat_page(chat_id: str, request: Request):
             "settings": settings,
             "model_options": ["auto", "granite", "gemma", "qwen"],
             "active_job_id": active_job_id,
+            "agent_enabled": _agent_enabled,
         },
     )
 
