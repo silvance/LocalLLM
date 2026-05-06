@@ -155,3 +155,46 @@
   font-size: 0.75rem;
   padding: 0.15rem 0.5rem;
 }
+
+/* Live lint panel under writer sections ---------------------------- */
+
+.lint-panel {
+  border-top: 1px solid var(--border);
+  padding: 0.5rem 0.9rem;
+  background: rgba(0, 0, 0, 0.18);
+}
+.lint-summary {
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.lint-summary.clean { color: #7ed98a; }
+.lint-summary.has-warnings { color: #d29922; }
+.lint-summary.has-errors { color: var(--warn); }
+
+.lint-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.lint-item {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+.lint-item.error .lint-msg { color: #f5b8b3; }
+.lint-item.warning .lint-msg { color: #f5d97a; }
+.lint-loc {
+  color: var(--muted);
+  flex-shrink: 0;
+  min-width: 5em;
+}
+.lint-msg {
+  flex: 1;
+}
