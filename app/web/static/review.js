@@ -67,6 +67,28 @@
     }
   }
 
+  // ---- Status banner (visible without devtools) ----
+
+  function setStatusBanner(msg, isError = false) {
+    let banner = document.getElementById("review-status-banner");
+    if (!banner) {
+      banner = document.createElement("div");
+      banner.id = "review-status-banner";
+      banner.style.cssText = "padding:0.4rem 0.85rem;font-size:0.85rem;border-radius:6px;margin:0.4rem 0;";
+      const promptArea = document.querySelector(".review-prompt");
+      if (promptArea) promptArea.appendChild(banner);
+    }
+    if (!msg) {
+      banner.style.display = "none";
+      banner.textContent = "";
+      return;
+    }
+    banner.style.display = "block";
+    banner.textContent = msg;
+    banner.style.background = isError ? "rgba(248,81,73,0.18)" : "rgba(47,129,247,0.15)";
+    banner.style.color = isError ? "#f5b8b3" : "var(--text)";
+  }
+
   function flashCopied(btn) {
     const o = btn.textContent;
     btn.textContent = "✓ Copied";
@@ -336,8 +358,25 @@
   // ---- SSE driver ----
 
   function startReview() {
+    try {
+      _startReviewImpl();
+    } catch (err) {
+      console.error("startReview threw", err);
+      const msg = `Could not start review: ${err && err.message ? err.message : String(err)}`;
+      $stream.innerHTML = `<div class="review-section role-reviewer"><div class="section-body">${escapeHtml(msg)}</div></div>`;
+      setStatusBanner(msg, true);
+      $runBtn.disabled = false;
+      $stopBtn.classList.add("hidden");
+    }
+  }
+
+  function _startReviewImpl() {
     const prompt = $promptInput.value.trim();
-    if (!prompt) return;
+    if (!prompt) {
+      setStatusBanner("Type a prompt first.", true);
+      return;
+    }
+    setStatusBanner("");
 
     clearStream();
     $runBtn.disabled = true;
@@ -357,13 +396,19 @@
         num_ctx: parseInt($numCtx.value, 10),
       }),
     })
-    .then(r => r.json())
+    .then(r => {
+      if (!r.ok) return r.text().then(t => { throw new Error(`POST /api/review ${r.status}: ${t}`); });
+      return r.json();
+    })
     .then(data => {
-      if (!data.job_id) throw new Error("no job id returned");
+      if (!data.job_id) throw new Error("server returned no job_id");
       subscribe(data.job_id);
     })
     .catch(err => {
-      $stream.innerHTML = `<div class="review-section role-reviewer"><div class="section-body">Error: ${escapeHtml(String(err))}</div></div>`;
+      console.error("review start failed", err);
+      const msg = err && err.message ? err.message : String(err);
+      $stream.innerHTML = `<div class="review-section role-reviewer"><div class="section-body">${escapeHtml(msg)}</div></div>`;
+      setStatusBanner(msg, true);
       $runBtn.disabled = false;
       $stopBtn.classList.add("hidden");
     });
@@ -478,4 +523,13 @@
   }
 
   hydrateSavedSections();
+
+  // Visible "I am alive" probe so a broken JS init doesn't look the same
+  // as "user clicked but nothing happened".
+  try {
+    if ($runBtn) {
+      $runBtn.dataset.jsReady = "1";
+      console.info("[review] JS initialized, runBtn =", $runBtn);
+    }
+  } catch (_) { /* never break init on logging */ }
 })();
