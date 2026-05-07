@@ -117,6 +117,33 @@ def copy_app(dst_root: Path) -> None:
         print(f"  copied {entry}")
 
 
+def copy_localllm_exe(dst_root: Path) -> bool:
+    """Copy the PyInstaller-built single-file binary into the bundle root.
+
+    The new bundle templates (install.bat / start.bat) drive everything
+    through this exe — Python, FastAPI, ChromaDB, and Ollama are all
+    embedded in it. Caller is responsible for having run pyinstaller
+    first; we just locate `dist/LocalLLM(.exe)` and copy it.
+
+    Returns True on success, False if no exe was found (still recoverable —
+    the legacy wheels-based install path can take over).
+    """
+    candidates = [
+        REPO_ROOT / "dist" / "LocalLLM.exe",
+        REPO_ROOT / "dist" / "LocalLLM",
+    ]
+    for src in candidates:
+        if src.exists() and src.is_file():
+            dst = dst_root / src.name
+            shutil.copy2(src, dst)
+            size_mb = dst.stat().st_size / 1024 / 1024
+            print(f"  copied {src.name} ({size_mb:.1f} MB)")
+            return True
+    print("  no LocalLLM(.exe) at dist/ — run `pyinstaller pyinstaller.spec` first")
+    print("  (the new install.bat / start.bat templates depend on it)")
+    return False
+
+
 def copy_index(dst_root: Path) -> bool:
     src = REPO_ROOT / "data" / "index"
     if not src.exists() or not any(src.iterdir()):
@@ -493,6 +520,8 @@ def main() -> int:
     parser.add_argument("--skip-models", action="store_true")
     parser.add_argument("--skip-wheels", action="store_true")
     parser.add_argument("--skip-index", action="store_true")
+    parser.add_argument("--skip-exe", action="store_true",
+                        help="Skip copying dist/LocalLLM(.exe) into the bundle.")
     parser.add_argument("--skip-manifest", action="store_true",
                         help="Skip the SHA256 manifest (faster for iterative dev)")
     args = parser.parse_args()
@@ -501,33 +530,39 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     print(f"Building bundle in {out}\n")
 
-    print("[1/7] App code")
+    print("[1/8] LocalLLM single-file binary")
+    if args.skip_exe:
+        print("  skipped")
+    else:
+        copy_localllm_exe(out)
+
+    print("\n[2/8] App code")
     copy_app(out)
 
-    print("\n[2/7] Chroma index")
+    print("\n[3/8] Chroma index")
     if args.skip_index:
         print("  skipped")
     else:
         copy_index(out)
 
-    print("\n[3/7] Python wheels")
+    print("\n[4/8] Python wheels")
     wheels_count = 0
     if args.skip_wheels:
         print("  skipped")
     else:
         wheels_count = download_python_wheels(out, args.platform, args.python_version)
 
-    print("\n[4/7] Ollama models")
+    print("\n[5/8] Ollama models")
     models_info: dict = {}
     if args.skip_models:
         print("  skipped")
     else:
         models_info = copy_ollama_models(args.models, find_ollama_models_dir(), out)
 
-    print("\n[5/7] Bundle templates")
+    print("\n[6/8] Bundle templates")
     copy_templates(out)
 
-    print("\n[6/7] Bundle stamp")
+    print("\n[7/8] Bundle stamp")
     write_bundle_stamp(
         out,
         models=args.models if not args.skip_models else [],
@@ -537,14 +572,15 @@ def main() -> int:
         models_info=models_info,
     )
 
-    print("\n[7/7] SHA256 manifest")
+    print("\n[8/8] SHA256 manifest")
     if args.skip_manifest:
         print("  skipped")
     else:
         write_sha256_manifest(out)
 
     print(f"\nBundle ready at: {out}")
-    print("Before transferring: place OllamaSetup.exe and python-3.12.x-amd64.exe in installers/")
+    print("If you used --skip-exe, run `pyinstaller pyinstaller.spec --clean --noconfirm` first")
+    print("and rebuild — install.bat / start.bat depend on LocalLLM.exe being present.")
     return 0
 
 
