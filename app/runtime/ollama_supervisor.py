@@ -112,11 +112,21 @@ class OllamaSupervisor:
     ) -> None:
         self.host = host
         self.port = port
+        self._explicit_binary = binary
         self.models_dir = models_dir or ollama_models_dir()
-        self.binary = binary or find_ollama_binary()
         self.log_path = log_path or (user_data_dir() / "ollama-localllm.log")
         self._proc: Optional[subprocess.Popen] = None
         self._log_handle = None
+
+    @property
+    def binary(self) -> Optional[Path]:
+        """Resolved lazily so callers see a freshly-extracted bundle.
+
+        Returning a cached `__init__`-time value would miss binaries
+        materialized after construction (e.g. PyInstaller `_MEIPASS`
+        extraction in tests, or operator-set ``LOCALLLM_OLLAMA_BIN``).
+        """
+        return self._explicit_binary or find_ollama_binary()
 
     # ----- introspection -------------------------------------------------
 
@@ -155,33 +165,41 @@ class OllamaSupervisor:
         env = os.environ.copy()
         env["OLLAMA_HOST"] = f"{self.host}:{self.port}"
         env["OLLAMA_MODELS"] = str(self.models_dir)
-        # Belt-and-suspenders: prevent ollama from hijacking telemetry on
-        # an airgap network where outbound calls would just hang.
+        # Outbound telemetry would just hang on an airgap network.
         env.setdefault("OLLAMA_NOHISTORY", "1")
 
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_handle = self.log_path.open("ab")
 
-        creationflags = 0
+        # Suppress Ollama's console window on Windows AND give it its
+        # own process group so a Ctrl-C delivered to our shell doesn't
+        # kill it before stop() runs. On POSIX, start_new_session does
+        # the equivalent so terminate() is scoped to just the child.
+        popen_kwargs: dict = {}
+        binary = self.binary
+        if binary is None:
+            log.error("Ollama binary disappeared between start() entry and spawn")
+            return False
         if sys.platform == "win32":
-            # CREATE_NO_WINDOW = 0x08000000 — keeps Ollama from popping
-            # up its own console window when we're launched via double-
-            # click (we already have one for our own logs).
-            creationflags = 0x08000000
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+            popen_kwargs["close_fds"] = True
 
         log.info(
             "Spawning ollama: %s serve  (host=%s:%s, models=%s, log=%s)",
-            self.binary, self.host, self.port, self.models_dir, self.log_path,
+            binary, self.host, self.port, self.models_dir, self.log_path,
         )
         self._proc = subprocess.Popen(
-            [str(self.binary), "serve"],
+            [str(binary), "serve"],
             env=env,
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            close_fds=(sys.platform != "win32"),
+            **popen_kwargs,
         )
 
         if not wait:

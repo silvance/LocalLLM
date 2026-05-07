@@ -8,16 +8,12 @@ the script we expect.
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from app import cli  # noqa: E402
+from app import cli
 
 
 # ---------------------------------------------------------------------------
@@ -85,32 +81,38 @@ def test_top_level_flag_routes_to_serve() -> None:
 def test_subcommand_proxies_to_correct_module(
     monkeypatch: pytest.MonkeyPatch, subcmd: str, module_name: str
 ) -> None:
-    """Each proxied subcommand should import the right module and call its main()."""
-    called = {"module": None, "argv": None}
+    """Each proxied subcommand should call ``main()`` on the named module
+    with sys.argv rewritten to ``[module_name, *forwarded_argv]``.
+
+    We register a stub module in ``sys.modules`` so the proxy's lazy
+    ``import_module`` lookup finds it without triggering the real script's
+    heavy top-level imports (chromadb, ollama-client, etc.). The minimal
+    CI test job intentionally doesn't install those.
+    """
+    captured: dict[str, object] = {"argv": None}
 
     def fake_main() -> int:
-        called["argv"] = list(sys.argv)
+        captured["argv"] = list(sys.argv)
         return 0
 
-    # Stub out the underlying module's main so we don't actually run it
-    # (build_bundle.main would shell out to ollama, build_index needs a
-    # corpus, etc.). What we're verifying here is the wiring.
-    from importlib import import_module
-    mod = import_module(module_name)
-    monkeypatch.setattr(mod, "main", fake_main)
+    fake = types.ModuleType(module_name)
+    fake.main = fake_main  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module_name, fake)
 
     rc = cli.COMMANDS[subcmd](["--some-flag", "value"])
     assert rc == 0
-    # The proxy sets sys.argv = [module_name, *forwarded_argv] for the duration
-    # of the inner call.
-    assert called["argv"] == [module_name, "--some-flag", "value"]
+    assert captured["argv"] == [module_name, "--some-flag", "value"]
 
 
 # ---------------------------------------------------------------------------
 # version subcommand — runs without crashing, shows the right keys
 # ---------------------------------------------------------------------------
 
-def test_version_subcommand_prints_diagnostics(capsys: pytest.CaptureFixture[str]) -> None:
+def test_version_subcommand_prints_diagnostics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Diagnostics print under a tmp data dir so we don't pollute ~/.local/."""
+    monkeypatch.setenv("LOCALLLM_DATA_DIR", str(tmp_path))
     rc = cli.COMMANDS["version"]([])
     assert rc == 0
     out = capsys.readouterr().out

@@ -13,17 +13,11 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from app.runtime import ollama_supervisor as os_mod  # noqa: E402
-from app.runtime.ollama_supervisor import (  # noqa: E402
+from app.runtime import ollama_supervisor as os_mod
+from app.runtime.ollama_supervisor import (
     OllamaSupervisor,
     find_ollama_binary,
     is_port_open,

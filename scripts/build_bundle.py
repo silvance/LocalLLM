@@ -536,7 +536,7 @@ def main() -> int:
     else:
         copy_localllm_exe(out)
 
-    print("\n[2/8] App code (legacy fallback)")
+    print("\n[2/8] App code")
     copy_app(out)
 
     print("\n[3/8] Chroma index")
@@ -545,7 +545,7 @@ def main() -> int:
     else:
         copy_index(out)
 
-    print("\n[4/8] Python wheels (legacy fallback)")
+    print("\n[4/8] Python wheels")
     wheels_count = 0
     if args.skip_wheels:
         print("  skipped")

@@ -22,56 +22,51 @@ own argparse, so ``LocalLLM.exe build-index --reset`` is identical to
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import socket
 import sys
 import threading
-import time
 import webbrowser
-from pathlib import Path
+from importlib import import_module
 from typing import Callable, Optional
+
+from app.runtime.paths import exe_dir, meipass_dir
 
 
 # When frozen by PyInstaller, scripts/ isn't on a normal Python path —
 # it's collected into _MEIPASS as a regular package. Make sure both dev
 # and frozen modes can `import scripts.foo`.
-def _ensure_paths() -> None:
-    if getattr(sys, "frozen", False):
-        base = Path(getattr(sys, "_MEIPASS", "."))
-    else:
-        base = Path(__file__).resolve().parent.parent
-    p = str(base)
-    if p not in sys.path:
-        sys.path.insert(0, p)
+_BASE = meipass_dir() or exe_dir()
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
 
 
-_ensure_paths()
+HELP_TOKENS = ("-h", "--help", "help")
+OLLAMA_HOST_ENV = "OLLAMA_HOST"
 
 
 # ---------------------------------------------------------------------------
 # serve — the double-click path
 # ---------------------------------------------------------------------------
 
-def _find_free_port(start: int = 8765) -> int:
-    for port in range(start, start + 100):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("127.0.0.1", port))
-                return port
-        except OSError:
-            continue
-    raise RuntimeError(f"no free TCP port in {start}-{start + 100}")
+def _pick_free_port() -> int:
+    """Bind to port 0 and let the kernel hand back a free one."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _wait_for_http(host: str, port: int, timeout: float = 30.0) -> bool:
+    """Poll until host:port accepts TCP, or give up after `timeout` seconds."""
+    from app.runtime.ollama_supervisor import is_port_open
+    import time
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=0.5):
-                return True
-        except OSError:
-            time.sleep(0.2)
+        if is_port_open(host, port, timeout=0.5):
+            return True
+        time.sleep(0.2)
     return False
 
 
@@ -83,7 +78,7 @@ def cmd_serve(argv: list[str]) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
         "--port", type=int, default=int(os.getenv("LOCALLLM_PORT", "0")),
-        help="Port to bind (0 = pick a free one in 8765+)",
+        help="Port to bind (0 = pick a free one)",
     )
     parser.add_argument(
         "--no-browser", action="store_true",
@@ -105,75 +100,65 @@ def cmd_serve(argv: list[str]) -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    log = logging.getLogger("localllm.cli")
 
     # Spin up Ollama BEFORE importing the FastAPI app so the app's
     # config sees the right OLLAMA_HOST when modules read os.environ.
-    supervisor = None
-    if not args.no_ollama:
-        from app.runtime.ollama_supervisor import OllamaSupervisor
+    with contextlib.ExitStack() as stack:
+        if not args.no_ollama:
+            from app.runtime.ollama_supervisor import OllamaSupervisor
+            supervisor = OllamaSupervisor(host="127.0.0.1", port=args.ollama_port)
+            if supervisor.start(wait=True, timeout=30.0):
+                stack.callback(supervisor.stop)
+                os.environ[OLLAMA_HOST_ENV] = supervisor.base_url
+                print(f"Ollama serving at {supervisor.base_url}", flush=True)
+            else:
+                log.warning(
+                    "embedded Ollama failed to start; model calls will fail until "
+                    "an Ollama instance is reachable at OLLAMA_HOST=%s",
+                    os.getenv(OLLAMA_HOST_ENV, "http://localhost:11434"),
+                )
 
-        supervisor = OllamaSupervisor(host="127.0.0.1", port=args.ollama_port)
-        if supervisor.start(wait=True, timeout=30.0):
-            os.environ["OLLAMA_HOST"] = supervisor.base_url
-            print(f"Ollama serving at {supervisor.base_url}", flush=True)
-        else:
-            print(
-                "WARNING: embedded Ollama failed to start. The app will run but "
-                "model calls will fail until an Ollama instance is reachable at "
-                f"OLLAMA_HOST={os.getenv('OLLAMA_HOST', 'http://localhost:11434')}",
-                file=sys.stderr,
-                flush=True,
-            )
-            supervisor = None  # Don't try to stop something that never started.
-
-    try:
-        import uvicorn  # noqa: F401
-        import app.web.app  # noqa: F401
-    except ImportError as exc:
-        print(f"ERROR: missing runtime dependency — {exc}", file=sys.stderr)
-        if supervisor:
-            supervisor.stop()
-        return 1
-
-    port = args.port or _find_free_port()
-    url = f"http://{args.host}:{port}"
-    print(f"Starting LocalLLM on {url} ...", flush=True)
-
-    def _serve() -> None:
-        import uvicorn
-        uvicorn.run(
-            "app.web.app:app",
-            host=args.host,
-            port=port,
-            log_level="warning",
-            access_log=False,
-        )
-
-    server_thread = threading.Thread(target=_serve, daemon=True, name="localllm-uvicorn")
-    server_thread.start()
-
-    if not _wait_for_http(args.host, port, timeout=30.0):
-        print(f"ERROR: server didn't bind on {args.host}:{port} within 30s", file=sys.stderr)
-        if supervisor:
-            supervisor.stop()
-        return 1
-
-    if not args.no_browser:
         try:
-            webbrowser.open(url)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Could not auto-open browser ({exc}). Open manually: {url}", flush=True)
+            import app.web.app  # noqa: F401
+        except ImportError as exc:
+            log.error("missing runtime dependency — %s", exc)
+            return 1
 
-    print(f"LocalLLM is running at {url}.", flush=True)
-    print("Close this window to stop.", flush=True)
+        port = args.port or _pick_free_port()
+        url = f"http://{args.host}:{port}"
+        print(f"Starting LocalLLM on {url} ...", flush=True)
 
-    try:
-        server_thread.join()
-    except KeyboardInterrupt:
-        print("\nStopping LocalLLM ...", flush=True)
-    finally:
-        if supervisor:
-            supervisor.stop()
+        def _serve() -> None:
+            import uvicorn
+            uvicorn.run(
+                "app.web.app:app",
+                host=args.host,
+                port=port,
+                log_level="warning",
+                access_log=False,
+            )
+
+        server_thread = threading.Thread(target=_serve, daemon=True, name="localllm-uvicorn")
+        server_thread.start()
+
+        if not _wait_for_http(args.host, port, timeout=30.0):
+            log.error("server didn't bind on %s:%s within 30s", args.host, port)
+            return 1
+
+        if not args.no_browser:
+            try:
+                webbrowser.open(url)
+            except Exception as exc:  # noqa: BLE001
+                print(f"Could not auto-open browser ({exc}). Open manually: {url}", flush=True)
+
+        print(f"LocalLLM is running at {url}.", flush=True)
+        print("Close this window to stop.", flush=True)
+
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            print("\nStopping LocalLLM ...", flush=True)
     return 0
 
 
@@ -191,7 +176,6 @@ def _proxy(import_path: str) -> Callable[[list[str]], int]:
     def run(argv: list[str]) -> int:
         module_name, _, func_name = import_path.partition(":")
         func_name = func_name or "main"
-        from importlib import import_module
         mod = import_module(module_name)
         fn = getattr(mod, func_name)
         prev_argv = sys.argv
@@ -209,8 +193,7 @@ def cmd_version(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="LocalLLM version")
     parser.parse_args(argv)
     from app.runtime.paths import (
-        env_file, exe_dir, is_frozen, meipass_dir, ollama_models_dir,
-        user_data_dir,
+        env_file, is_frozen, ollama_models_dir, user_data_dir,
     )
     from app.runtime.ollama_supervisor import find_ollama_binary
 
@@ -264,13 +247,12 @@ def _parse_top_level(argv: list[str]) -> tuple[Optional[str], list[str]]:
     if not argv:
         return "serve", []
     head = argv[0]
-    if head in ("-h", "--help", "help"):
+    if head in HELP_TOKENS:
         return None, []
     if head in COMMANDS:
         return head, argv[1:]
-    # Unknown first arg — assume the user is passing flags to `serve`
-    # (e.g. `LocalLLM --no-browser`).
     if head.startswith("-"):
+        # Unknown leading flag — assume the user is passing flags to `serve`.
         return "serve", argv
     print(f"ERROR: unknown subcommand: {head!r}", file=sys.stderr)
     print(file=sys.stderr)
@@ -282,7 +264,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cmd, rest = _parse_top_level(argv)
     if cmd is None:
         _print_help()
-        return 0 if argv and argv[0] in ("-h", "--help", "help") else 2
+        return 0 if argv and argv[0] in HELP_TOKENS else 2
     return COMMANDS[cmd](rest)
 
 

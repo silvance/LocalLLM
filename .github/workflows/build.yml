@@ -50,11 +50,18 @@ jobs:
           python -m pip install --use-pep517 -r requirements.txt
           python -m pip install --use-pep517 -r requirements-agent.txt
           python -m pip install pyinstaller==6.16.0
+      - name: Cache Ollama bundle (${{ env.OLLAMA_VERSION }})
+        id: cache-ollama
+        uses: actions/cache@v4
+        with:
+          path: vendor/ollama
+          key: ollama-${{ env.OLLAMA_VERSION }}-windows-amd64
       - name: Download embedded Ollama (${{ env.OLLAMA_VERSION }})
         # Ollama publishes a self-contained Windows zip with ollama.exe
         # plus the runner DLLs/exes for CPU + CUDA backends. We extract
         # the whole thing into vendor/ollama/ so the supervisor finds
         # both the launcher and its runners under _MEIPASS at runtime.
+        if: steps.cache-ollama.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $url = "https://github.com/ollama/ollama/releases/download/${{ env.OLLAMA_VERSION }}/ollama-windows-amd64.zip"
@@ -131,7 +138,14 @@ jobs:
           python -m pip install --use-pep517 -r requirements.txt
           python -m pip install --use-pep517 -r requirements-agent.txt
           python -m pip install pyinstaller==6.16.0
+      - name: Cache Ollama bundle (${{ env.OLLAMA_VERSION }})
+        id: cache-ollama
+        uses: actions/cache@v4
+        with:
+          path: vendor/ollama
+          key: ollama-${{ env.OLLAMA_VERSION }}-linux-amd64
       - name: Download embedded Ollama (${{ env.OLLAMA_VERSION }})
+        if: steps.cache-ollama.outputs.cache-hit != 'true'
         run: |
           mkdir -p vendor/ollama
           url="https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tgz"
