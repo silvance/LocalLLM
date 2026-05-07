@@ -29,6 +29,7 @@ sneakernet:
    - Install Ollama silently
    - Create `LocalLLM\.venv\` and `pip install` from the bundled wheels (offline)
    - Copy `.env.example` → `.env` if there's no existing config
+   - **Smart-install**: detect this machine's CPU/RAM/GPU and configure `DEFAULT_MODEL` for the sidebar so a slow box doesn't open with `qwen3-coder:30b` pre-selected. The bundle ships ALL four models — this only steers the UI defaults. Re-run anytime via `python scripts\smart_install.py` if hardware changes.
 4. **Open a fresh shell** (so the new PATH applies), then `start.bat`.
    The default UI is the FastAPI app at <http://127.0.0.1:8000>.
    Pass `--streamlit` for the legacy UI:

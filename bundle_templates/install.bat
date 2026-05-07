@@ -57,7 +57,7 @@ REM start.bat sets OLLAMA_MODELS to the bundle-local path so we never touch
 REM any existing Ollama install on this machine.
 
 echo.
-echo [3/3] Creating Python venv and installing dependencies offline...
+echo [3/4] Creating Python venv and installing dependencies offline...
 cd LocalLLM
 python -m venv .venv
 if errorlevel 1 (
@@ -74,9 +74,21 @@ if errorlevel 1 (
 if not exist ".env" (
     if exist ".env.example" copy /Y ".env.example" ".env" >nul
 )
+
+echo.
+echo [4/4] Smart-install: detecting hardware and configuring defaults...
+REM smart_install.py inspects this machine's CPU/RAM/GPU and picks a
+REM sensible DEFAULT_MODEL for the sidebar so a slow box doesn't open
+REM with qwen3-coder pre-selected (or a fast box default to granite).
+REM The bundle ships ALL models; this only steers the UI defaults.
+python scripts\smart_install.py
+if errorlevel 1 (
+    echo WARNING: smart-install configuration failed; continuing with defaults.
+)
 cd ..
 
 echo.
 echo Install complete. Run start.bat to launch LocalLLM.
+echo If hardware changes, re-run: python scripts\smart_install.py
 echo (Optional) Run verify.ps1 to validate bundle integrity against SHA256SUMS.txt.
 endlocal
