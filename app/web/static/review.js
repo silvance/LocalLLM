@@ -272,7 +272,8 @@
     // Finalize the previous section (re-render with code blocks)
     finalizePrevious();
 
-    const sec = document.createElement("div");
+    const sec = document.createElement("details");
+    sec.open = true;
     sec.className = `review-section role-${role}`;
     sec.dataset.role = role;
     sec.dataset.model = model;
@@ -280,11 +281,11 @@
     sec.dataset.startedAt = String(Date.now());
     sec.dataset.tokenCount = "0";
     sec.innerHTML =
-      `<div class="section-header">` +
+      `<summary class="section-header">` +
         `<span class="role-label">Round ${index + 1} · ${role} · ${escapeHtml(model)}</span>` +
         `<span class="section-stats" data-stats="">…</span>` +
         `<button type="button" class="btn ghost copy-section">📋 Copy</button>` +
-      `</div>` +
+      `</summary>` +
       `<div class="section-body section-loading" data-raw="">⏳ Loading ${escapeHtml(role)} (${escapeHtml(model)})…</div>`;
     $stream.appendChild(sec);
     currentSection = sec;
@@ -466,18 +467,24 @@
     await fetch(`/api/jobs/${activeJobId}/stop`, { method: "POST" });
   });
 
-  // Copy buttons (delegated)
+  // Copy buttons (delegated). Buttons live inside <summary> elements
+  // (the section is now a <details> for collapse), so any click that
+  // belongs to a real button must preventDefault — otherwise the click
+  // bubbles to summary and toggles the section closed.
   $stream.addEventListener("click", async (e) => {
     const t = e.target;
     if (t.classList.contains("copy-section")) {
+      e.preventDefault();
       const raw = t.closest(".review-section").querySelector(".section-body").dataset.raw || "";
       const ok = await copyToClipboard(raw);
       if (ok) flashCopied(t);
     } else if (t.classList.contains("copy-code")) {
+      e.preventDefault();
       const code = t.closest(".code-block").querySelector("pre code").textContent;
       const ok = await copyToClipboard(code);
       if (ok) flashCopied(t);
     } else if (t.classList.contains("toggle-diff")) {
+      e.preventDefault();
       toggleDiff(t.closest(".review-section"));
     }
   });

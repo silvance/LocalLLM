@@ -49,8 +49,18 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  overflow: hidden;
+  /* No `overflow: hidden` — that would clip the inner scrollbar.
+     The header/body each handle their own corner rounding. */
 }
+/* <details>'s built-in disclosure marker, replaced with a chevron
+   we style below. Cursor + user-select prevent text-selection on
+   double-click of the header. */
+.review-section > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.review-section > summary::-webkit-details-marker { display: none; }
 .review-section .section-header {
   display: flex;
   justify-content: space-between;
@@ -58,8 +68,26 @@
   padding: 0.5rem 0.9rem;
   background: rgba(255, 255, 255, 0.03);
   border-bottom: 1px solid var(--border);
+  border-radius: 8px 8px 0 0;
+}
+.review-section:not([open]) .section-header {
+  border-bottom: none;
+  border-radius: 8px;
+}
+.review-section .section-header::before {
+  content: "▾";
+  display: inline-block;
+  margin-right: 0.5rem;
+  width: 0.7em;
+  text-align: center;
+  color: var(--muted);
+  transition: transform 0.12s ease;
+}
+.review-section:not([open]) .section-header::before {
+  transform: rotate(-90deg);
 }
 .review-section .role-label {
+  flex: 1;
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -75,6 +103,11 @@
   font-family: inherit;
   font-size: 0.95rem;
   line-height: 1.5;
+  /* Cap height so a long writer / reviewer turn doesn't push the next
+     section off-screen — operator can scroll within, or fold the
+     whole section by clicking the header. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .review-section .section-body .code-block {
