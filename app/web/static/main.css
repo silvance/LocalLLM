@@ -200,17 +200,94 @@ button {
   color: var(--muted);
   letter-spacing: 0.05em;
 }
-.copy-msg {
+.copy-msg, .edit-msg, .regen-msg {
   font-size: 0.75rem;
   padding: 0.15rem 0.4rem;
   opacity: 0;
   transition: opacity 0.15s ease;
 }
-.message:hover .copy-msg {
+.message:hover .copy-msg,
+.message:hover .edit-msg,
+.message:hover .regen-msg {
   opacity: 0.6;
 }
-.copy-msg:hover {
+.copy-msg:hover,
+.edit-msg:hover,
+.regen-msg:hover {
   opacity: 1 !important;
+}
+
+.edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.edit-input {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.5rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  resize: vertical;
+}
+.edit-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.citations {
+  margin-top: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+.citations summary {
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+}
+.citations summary:hover {
+  color: var(--text);
+}
+.citations ol {
+  margin: 0.5rem 0 0;
+  padding-left: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.citation-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+}
+.citation-head code {
+  background: transparent;
+  padding: 0;
+  color: var(--text);
+  word-break: break-all;
+}
+.citation-score {
+  color: var(--muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+.citation-snippet {
+  margin: 0.2rem 0 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--code-bg, var(--bg));
+  border-radius: 3px;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  max-height: 12em;
+  overflow-y: auto;
 }
 .copy-msg.copied,
 #copy-chat-btn.copied,

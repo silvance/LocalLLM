@@ -38,3 +38,6 @@ build/
 # Single-binary runtime data + downloaded vendor binaries
 LocalLLM-Data/
 vendor/ollama/
+
+# Inno Setup installer output
+installer/Output/

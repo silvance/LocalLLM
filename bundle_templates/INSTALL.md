@@ -79,6 +79,7 @@ LocalLLM.exe build-bundle          Build a new bundle (home-machine workflow).
 LocalLLM.exe build-index           Index the corpus (Chroma + BM25).
 LocalLLM.exe fetch-corpus          Pull source repos defined in corpus.yaml.
 LocalLLM.exe version               Print version + paths + diagnostics.
+LocalLLM.exe doctor                Run self-test checks (paths, ollama, models, RAG).
 LocalLLM.exe <subcommand> --help   See options for any subcommand.
 ```
 
@@ -106,12 +107,32 @@ When the corpus, models, or app code changes on the home machine:
 
 The 128 GB system RAM has plenty of headroom for partial-offload of qwen3-coder.
 
+## Validating a fresh install
+
+Run these once per machine to make sure everything works end-to-end. If
+any step fails, `LocalLLM.exe doctor` typically tells you what to fix.
+
+1. **`LocalLLM.exe doctor`** — runs path / Ollama / model / RAG self-tests.
+   All checks should report `[ OK ]` or `[WARN]`. Any `[FAIL]` blocks normal use.
+2. **`LocalLLM.exe version`** — confirms the embedded Ollama binary path is
+   listed (not "(not found)").
+3. **`LocalLLM.exe recommend-models`** — confirms hardware detection works
+   and matches reality (right CPU/GPU/RAM).
+4. **Double-click `LocalLLM.exe`** (or `start.bat`) — browser opens, the
+   model dropdown lists models, sending a short prompt streams a response.
+5. **Toggle "Use RAG" + send another prompt** — verify retrieval triggers and
+   `📚 N sources` appears in the response metadata.
+6. **Open the Review page** (sidebar) — submit a tiny prompt against two models,
+   confirm both stream and the synthesizer runs.
+
+If step 4 or 5 fails, check `<user_data>/ollama-localllm.log` (printed by
+`LocalLLM.exe version`) for Ollama startup errors.
+
 ## Troubleshooting
 
 - **`LocalLLM.exe` does nothing on double-click** — open `cmd`, `cd` to the
-  bundle, run `LocalLLM.exe version`. That prints the discovered paths
-  and the location of the embedded Ollama binary; missing entries point
-  at the issue.
+  bundle, run `LocalLLM.exe doctor`. That runs every diagnostic and prints
+  what's wrong + how to fix it.
 - **`Ollama did not respond within 30s`** — check `ollama-localllm.log`
   in the user data directory printed by `LocalLLM.exe version`. Could
   be a port conflict on `:11435` or a corrupt model blob.

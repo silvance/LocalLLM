@@ -14,6 +14,7 @@ Subcommands:
     build-index        Index the corpus (Chroma + BM25)
     fetch-corpus       Pull source repos defined in corpus.yaml
     version            Print version + frozen-binary diagnostics
+    doctor             Run self-test checks (paths, ollama, models, RAG)
 
 Each subcommand forwards remaining argv to the underlying script's
 own argparse, so ``LocalLLM.exe build-index --reset`` is identical to
@@ -212,6 +213,17 @@ def cmd_version(argv: list[str]) -> int:
     return 0
 
 
+def cmd_doctor(argv: list[str]) -> int:
+    """Run self-test checks (paths, ollama, models, RAG)."""
+    parser = argparse.ArgumentParser(
+        prog="LocalLLM doctor",
+        description="Run diagnostic checks. Exits 1 if any check FAILs.",
+    )
+    parser.parse_args(argv)
+    from app.runtime.doctor import main as doctor_main
+    return doctor_main()
+
+
 COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "serve":            cmd_serve,
     "smart-install":    _proxy("scripts.smart_install"),
@@ -220,6 +232,7 @@ COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "build-index":      _proxy("scripts.build_index"),
     "fetch-corpus":     _proxy("scripts.fetch_corpus"),
     "version":          cmd_version,
+    "doctor":           cmd_doctor,
 }
 
 

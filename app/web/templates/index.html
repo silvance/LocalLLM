@@ -88,6 +88,11 @@
           <div class="message-header">
             <span class="role">{{ msg.role }}</span>
             <button type="button" class="btn ghost copy-msg" title="Copy message text">📋</button>
+            {% if msg.role == "user" %}
+              <button type="button" class="btn ghost edit-msg" title="Edit and re-run">✎</button>
+            {% elif msg.role == "assistant" %}
+              <button type="button" class="btn ghost regen-msg" title="Regenerate this response">↻</button>
+            {% endif %}
           </div>
           <div class="content" data-raw="{{ msg.content }}">{{ msg.content }}</div>
         </div>

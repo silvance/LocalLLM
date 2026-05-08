@@ -271,11 +271,65 @@ async def send_message(chat_id: str, request: Request) -> JSONResponse:
     if session is None:
         raise HTTPException(404, f"chat {chat_id} not found")
 
-    # 1. Persist the user message right away so the next page render shows it.
     session.messages.append(ChatMessage(role="user", content=user_text))
     chat_storage.save(session)
+    job_id = await _kick_off_generation(session, body)
+    return JSONResponse({"job_id": job_id, "user_message": user_text})
 
-    # 2. Build the chat request: optional system prompt + full message history.
+
+@app.post("/api/chats/{chat_id}/messages/{index}/regenerate")
+async def regenerate_message(
+    chat_id: str, index: int, request: Request,
+) -> JSONResponse:
+    """Discard messages from `index` onward and re-run inference using the
+    user message that preceded `index`. Use case: assistant gave a bad
+    answer; the user wants another roll of the dice with the same prompt.
+    """
+    body = await _parse_message_body(request)
+    session = chat_storage.load(chat_id)
+    if session is None:
+        raise HTTPException(404, f"chat {chat_id} not found")
+    if not 0 < index <= len(session.messages):
+        raise HTTPException(400, "invalid message index")
+    if session.messages[index - 1].role != "user":
+        # Regenerating an assistant turn that wasn't preceded by a user
+        # message would re-run with no fresh prompt — not meaningful.
+        raise HTTPException(400, "no preceding user message to regenerate from")
+    session.messages = session.messages[:index]
+    chat_storage.save(session)
+    job_id = await _kick_off_generation(session, body)
+    return JSONResponse({"job_id": job_id})
+
+
+@app.post("/api/chats/{chat_id}/messages/{index}/edit")
+async def edit_message(
+    chat_id: str, index: int, request: Request,
+) -> JSONResponse:
+    """Replace the user message at `index` with new content and re-run
+    everything after it. Server-side truncation prevents stale assistant
+    turns from leaking into the next request's context."""
+    body = await _parse_message_body(request)
+    new_text = (body.get("content") or "").strip()
+    if not new_text:
+        raise HTTPException(400, "empty message")
+    session = chat_storage.load(chat_id)
+    if session is None:
+        raise HTTPException(404, f"chat {chat_id} not found")
+    if not 0 <= index < len(session.messages):
+        raise HTTPException(400, "invalid message index")
+    if session.messages[index].role != "user":
+        raise HTTPException(400, "can only edit user messages")
+    session.messages = session.messages[:index]
+    session.messages.append(ChatMessage(role="user", content=new_text))
+    chat_storage.save(session)
+    job_id = await _kick_off_generation(session, body)
+    return JSONResponse({"job_id": job_id, "user_message": new_text})
+
+
+async def _kick_off_generation(session: ChatSession, body: dict) -> str:
+    """Build the ChatRequest from body settings, create a job, start the
+    background producer, return the job_id. Shared by send/regenerate/edit
+    so they can't drift on routing/RAG/system-prompt handling."""
     selection: str = body.get("model_selection") or settings.default_model or "auto"
     use_rag: bool = bool(body.get("use_rag", False))
     system_prompt: str = (body.get("system_prompt") or "").strip()
@@ -296,19 +350,18 @@ async def send_message(chat_id: str, request: Request) -> JSONResponse:
         num_ctx=int(num_ctx) if num_ctx is not None else None,
     )
 
-    # 3. Create job + spawn background producer
+    last = session.messages[-1] if session.messages else None
     job = job_manager.create(
-        chat_id=chat_id,
+        chat_id=session.id,
         request_data={
             "selection": selection,
             "use_rag": use_rag,
-            "user_message_chars": len(user_text),
+            "user_message_chars": len(last.content) if last and last.role == "user" else 0,
         },
     )
     loop = asyncio.get_running_loop()
     _start_generation_thread(job, chat_request, selection, use_rag, loop)
-
-    return JSONResponse({"job_id": job.id, "user_message": user_text})
+    return job.id
 
 
 async def _parse_message_body(request: Request) -> dict:
