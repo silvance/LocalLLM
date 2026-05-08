@@ -10,11 +10,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.agent.loop import run_agent
 from app.config import get_settings
+from app.web.app import NoCacheStaticFiles
 
 
 logger = logging.getLogger("localllm")
@@ -24,7 +24,7 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 agent_templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-agent_static = StaticFiles(directory=str(_STATIC_DIR))
+agent_static = NoCacheStaticFiles(directory=str(_STATIC_DIR))
 
 router = APIRouter()
 

@@ -265,14 +265,21 @@
   // Streaming
   // ============================================================
 
+  // The chat column owns the scroll (so the scrollbar sits at the
+  // column edge, not at the centered .messages edge). Read/write
+  // scroll on the closest scrollable ancestor of $messages so we
+  // don't need to know whether it's <main class="chat"> or some
+  // future wrapper.
+  const $scroller = $messages.parentElement || $messages;
+
   function scrollToBottom() {
     requestAnimationFrame(() => {
-      $messages.scrollTop = $messages.scrollHeight;
+      $scroller.scrollTop = $scroller.scrollHeight;
     });
   }
 
   function isScrolledNearBottom() {
-    return $messages.scrollHeight - $messages.scrollTop - $messages.clientHeight < 80;
+    return $scroller.scrollHeight - $scroller.scrollTop - $scroller.clientHeight < 80;
   }
 
   function showStreaming() {

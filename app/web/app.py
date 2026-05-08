@@ -31,6 +31,22 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+
+class NoCacheStaticFiles(StaticFiles):
+    """StaticFiles with `Cache-Control: no-cache` on every response.
+
+    Default StaticFiles relies on browser heuristic caching (may keep
+    a CSS file for hours), which means an updated stylesheet won't
+    show up until the user hard-refreshes — pretty hostile during
+    iterative UI work. `no-cache` tells the browser to revalidate on
+    every request; combined with the parent's ETag/Last-Modified
+    handling, unchanged files still get a cheap 304.
+    """
+    async def get_response(self, path, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 from app.config import get_settings
 from app.schemas.chat import ChatMessage, ChatRequest
 from app.services.chat_service import ChatService
@@ -85,7 +101,7 @@ job_manager = JobManager()
 
 
 app = FastAPI(title="LocalLLM")
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+app.mount("/static", NoCacheStaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 # Online agent variant — only present when app/agent/ is on disk. The
 # airgap bundle excludes that directory, so this try-import quietly
