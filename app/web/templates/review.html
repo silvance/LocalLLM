@@ -116,6 +116,11 @@
     </div>
   </main>
 
+  <script>
+    window.LOCALLLM = {
+      activeJobId: {{ active_job_id|tojson if active_job_id else "null" }},
+    };
+  </script>
   <script src="/static/sidebar.js"></script>
   <script src="/static/review.js"></script>
 </body>

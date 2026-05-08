@@ -49,14 +49,15 @@ def _missing_agent_deps() -> list[str]:
 
 
 def _find_active_agent_job() -> Optional[dict]:
-    """Most-recent agent job that's still running. Lets the /agent page
-    reattach its SSE stream when the user navigates away mid-loop and
-    comes back."""
+    """Most-recent agent job, regardless of status. Lets the /agent page
+    reattach output when the user navigates away mid-loop OR comes back
+    after the loop finished — agent has no on-disk persistence, so this
+    in-memory lookup is the only way to preserve their last research
+    session across navigation. The /api/jobs/{id}/stream endpoint already
+    replays the buffer + emits a `done` event for terminal jobs, so the
+    JS subscribe path handles both running and finished cases uniformly."""
     from app.web.app import job_manager
-    candidates = [
-        j for j in job_manager.list_with_chat_prefix("agent-")
-        if j.status in ("pending", "streaming")
-    ]
+    candidates = list(job_manager.list_with_chat_prefix("agent-"))
     if not candidates:
         return None
     job = max(candidates, key=lambda j: j.started_at)
@@ -64,6 +65,7 @@ def _find_active_agent_job() -> Optional[dict]:
         "job_id": job.id,
         "model": str(job.request_data.get("model") or ""),
         "prompt": str(job.request_data.get("prompt") or ""),
+        "status": job.status,
     }
 
 

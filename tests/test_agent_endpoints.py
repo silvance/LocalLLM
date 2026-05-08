@@ -82,3 +82,42 @@ def test_agent_page_shows_active_job_after_navigation(
     assert "agent resume probe" in body
     assert job_id in body
     assert "activeJob" in body
+
+
+def test_agent_page_keeps_finished_job_visible(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Once the agent loop finishes, returning to /agent should still
+    surface the most-recent run so the user can see its output. Agent
+    has no on-disk persistence — this in-memory lookup is the only way
+    to keep that work visible across navigation."""
+    from app.web import app as web_app
+    from app.agent import routes as agent_routes
+
+    monkeypatch.setattr(agent_routes, "_missing_agent_deps", lambda: [])
+
+    def _instant_finish(*_args, **_kwargs):
+        return "final synthesised answer"
+
+    monkeypatch.setattr(agent_routes, "run_agent", _instant_finish)
+
+    r = client.post("/api/agent", json={
+        "prompt": "finished-job probe",
+        "model": "granite",
+    })
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+
+    # Wait for the daemon thread to land its finish() call.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if web_app.job_manager.get(job_id).status in ("done", "error"):
+            break
+        time.sleep(0.02)
+
+    page = client.get("/agent")
+    assert page.status_code == 200
+    body = page.text
+    # Even though the job is done, /agent should still surface it.
+    assert job_id in body
+    assert "finished-job probe" in body

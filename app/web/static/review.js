@@ -524,6 +524,15 @@
 
   hydrateSavedSections();
 
+  // Resume on reload: server passed an in-flight review job_id, so
+  // re-attach the SSE stream. The /api/jobs/{id}/stream endpoint
+  // replays buffered text + checkpoints so section_start markers and
+  // partial sections render correctly even though we joined late.
+  const activeJobId = window.LOCALLLM && window.LOCALLLM.activeJobId;
+  if (activeJobId) {
+    subscribe(activeJobId);
+  }
+
   // Visible "I am alive" probe so a broken JS init doesn't look the same
   // as "user clicked but nothing happened".
   try {
