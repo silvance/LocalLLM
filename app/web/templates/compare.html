@@ -103,6 +103,7 @@
             <header>
               <h3>{{ o.model_key }} {% if loaded.winner == o.model_key %}🏆{% endif %}</h3>
               <code class="model-name">{{ o.model_name }}</code>
+              <button type="button" class="btn ghost copy-pane" title="Copy this pane">📋</button>
             </header>
             <div class="compare-meta">
               {% if o.error %}<span class="error">❌ {{ o.error }}</span>

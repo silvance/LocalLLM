@@ -104,18 +104,23 @@
     <div id="review-stream" class="review-stream">
       {% if loaded_dict %}
         {% for sec in loaded_dict.sections %}
-          <div class="review-section role-{{ sec.role }}" data-role="{{ sec.role }}" data-model="{{ sec.model }}">
-            <div class="section-header">
+          <details open class="review-section role-{{ sec.role }}" data-role="{{ sec.role }}" data-model="{{ sec.model }}">
+            <summary class="section-header">
               <span class="role-label">Round {{ loop.index }} · {{ sec.role }} · {{ sec.model }}</span>
               <button type="button" class="btn ghost copy-section">📋 Copy</button>
-            </div>
+            </summary>
             <div class="section-body" data-raw="{{ sec.text }}">{{ sec.text }}</div>
-          </div>
+          </details>
         {% endfor %}
       {% endif %}
     </div>
   </main>
 
+  <script>
+    window.LOCALLLM = {
+      activeJobId: {{ active_job_id|tojson if active_job_id else "null" }},
+    };
+  </script>
   <script src="/static/sidebar.js"></script>
   <script src="/static/review.js"></script>
 </body>

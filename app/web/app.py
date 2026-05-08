@@ -74,6 +74,7 @@ from app.utils.review_storage import (
     ReviewStorage,
     new_session as new_review_session,
 )
+from app.utils.system_prompt import compose as compose_system_prompt
 from app.web.job_manager import Job, JobManager
 
 
@@ -362,8 +363,9 @@ async def _kick_off_generation(session: ChatSession, body: dict) -> str:
     num_ctx = body.get("num_ctx")
 
     request_messages: list[ChatMessage] = []
-    if system_prompt:
-        request_messages.append(ChatMessage(role="system", content=system_prompt))
+    composed_system = compose_system_prompt(system_prompt)
+    if composed_system:
+        request_messages.append(ChatMessage(role="system", content=composed_system))
     request_messages.extend(session.messages)
 
     chat_request = ChatRequest(
@@ -501,7 +503,17 @@ REVISE_INSTRUCTION = (
 
 @app.get("/review", response_class=HTMLResponse)
 async def review_page(request: Request):
-    return _render_review_page(request, loaded=None)
+    # If a review is currently running, jump straight to its detail page
+    # so the user lands on the live stream instead of a blank form. The
+    # /review/{id} route's `loaded` state + active_job_id combo handles
+    # resume from there.
+    in_flight_id = _find_active_review_id()
+    if in_flight_id:
+        return RedirectResponse(
+            url=f"/review/{in_flight_id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    return _render_review_page(request, loaded=None, active_job_id=None)
 
 
 @app.get("/review/{review_id}", response_class=HTMLResponse)
@@ -509,10 +521,29 @@ async def review_load_page(review_id: str, request: Request):
     session = review_storage.load(review_id)
     if session is None:
         raise HTTPException(404, f"review {review_id} not found")
-    return _render_review_page(request, loaded=session)
+    active = job_manager.jobs_active_for_chat(f"review-{review_id}")
+    return _render_review_page(
+        request,
+        loaded=session,
+        active_job_id=active[0].id if active else None,
+    )
 
 
-def _render_review_page(request: Request, loaded) -> HTMLResponse:
+def _find_active_review_id() -> Optional[str]:
+    """Most-recent review whose job is still streaming. Returns the
+    review_id (which doubles as a route key) so /review can redirect."""
+    candidates = [
+        j for j in job_manager.list_with_chat_prefix("review-")
+        if j.status in ("pending", "streaming")
+    ]
+    if not candidates:
+        return None
+    job = max(candidates, key=lambda j: j.started_at)
+    rid = str(job.request_data.get("review_id") or "")
+    return rid or None
+
+
+def _render_review_page(request: Request, loaded, active_job_id=None) -> HTMLResponse:
     summaries = review_storage.list_summaries()
     return templates.TemplateResponse(
         request,
@@ -522,6 +553,7 @@ def _render_review_page(request: Request, loaded) -> HTMLResponse:
             "model_options": ["auto", "granite", "gemma", "qwen"],
             "summaries": summaries,
             "loaded": loaded,
+            "active_job_id": active_job_id,
             "loaded_dict": (
                 {
                     "id": loaded.id,
@@ -701,8 +733,9 @@ def _start_review_thread(
 
         def base_messages() -> list[ChatMessage]:
             msgs: list[ChatMessage] = []
-            if system_prompt:
-                msgs.append(ChatMessage(role="system", content=system_prompt))
+            composed = compose_system_prompt(system_prompt)
+            if composed:
+                msgs.append(ChatMessage(role="system", content=composed))
             return msgs
 
         try:
@@ -942,8 +975,9 @@ async def start_compare(request: Request) -> JSONResponse:
         raise HTTPException(400, f"unknown model(s): {', '.join(unknown)}")
 
     messages: list[ChatMessage] = []
-    if system_prompt:
-        messages.append(ChatMessage(role="system", content=system_prompt))
+    composed_system = compose_system_prompt(system_prompt)
+    if composed_system:
+        messages.append(ChatMessage(role="system", content=composed_system))
     messages.append(ChatMessage(role="user", content=prompt))
     chat_request = ChatRequest(messages=messages, stream=True)
 

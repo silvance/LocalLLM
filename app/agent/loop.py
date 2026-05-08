@@ -163,8 +163,14 @@ def run_agent(
             except Exception:
                 logger.exception("on_event %s callback raised", name)
 
+    # Compose the agent's task-specific prompt with the always-on
+    # anti-hallucination baseline. Same composition the chat/review/
+    # compare paths use, just with the agent's research-loop guidance
+    # as the "task-specific" layer.
+    from app.utils.system_prompt import compose as compose_system_prompt
+    system_content = compose_system_prompt(SYSTEM_PROMPT)
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_prompt},
     ]
 

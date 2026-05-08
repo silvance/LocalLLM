@@ -17,6 +17,32 @@
   box-sizing: border-box;
 }
 
+/* Minimalist scrollbars that blend with the dark background — same
+   shape Claude/ChatGPT use. Track is transparent (so it disappears
+   into whichever panel it's on) and the thumb is a low-contrast
+   sliver that brightens on hover. */
+* {
+  scrollbar-width: thin;                                    /* Firefox */
+  scrollbar-color: rgba(230, 237, 243, 0.18) transparent;   /* Firefox */
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(230, 237, 243, 0.18);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(230, 237, 243, 0.32);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 body {
   margin: 0;
   background: var(--bg);

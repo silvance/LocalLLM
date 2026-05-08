@@ -152,3 +152,45 @@ def test_edit_rejects_empty_content(client: TestClient) -> None:
         json={"content": "   "},
     )
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Hidden anti-hallucination baseline is prepended to every system message
+# ---------------------------------------------------------------------------
+
+def test_chat_request_prepends_baseline_system_prompt(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Even when the user supplies their own system prompt, the hidden
+    baseline must appear first in the assembled system message so the
+    model sees the anti-hallucination guardrail."""
+    from app.web import app as web_app
+    from app.utils.system_prompt import BASELINE
+
+    captured: dict[str, object] = {}
+
+    def _capture_thread(job, request_obj, selection, use_rag, loop):
+        captured["messages"] = list(request_obj.messages)
+        web_app.job_manager.append_chunk(job.id, "ok", loop)
+        web_app.job_manager.finish(job.id, "done", loop, metadata={})
+        web_app._persist_assistant_message(job)
+
+    monkeypatch.setattr(web_app, "_start_generation_thread", _capture_thread)
+
+    r = client.post("/chats", follow_redirects=False)
+    chat_id = r.headers["location"].rsplit("/", 1)[-1]
+
+    user_system = "You ARE a pirate."
+    r = client.post(
+        f"/api/chats/{chat_id}/messages",
+        json={"content": "hi", "system_prompt": user_system},
+    )
+    assert r.status_code == 200
+    msgs = captured["messages"]  # type: ignore[index]
+    assert msgs, "thread didn't capture any messages"
+    sys_msg = msgs[0]
+    assert sys_msg.role == "system"
+    # Baseline ALWAYS appears before the user-supplied content.
+    baseline_idx = sys_msg.content.index(BASELINE.strip().splitlines()[0])
+    user_idx = sys_msg.content.index(user_system)
+    assert baseline_idx < user_idx
