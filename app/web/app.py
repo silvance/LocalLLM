@@ -69,6 +69,12 @@ from app.utils.comparison_storage import (
     ModelOutput,
     new_run as new_comparison_run,
 )
+from app.services.review_gates import (
+    all_passed as gates_all_passed,
+    format_for_writer as gates_format_for_writer,
+    run_gates,
+)
+from app.utils.code_linter import extract_python_blocks
 from app.utils.review_storage import (
     ReviewSection,
     ReviewStorage,
@@ -654,9 +660,14 @@ def _start_review_thread(
     num_ctx: int | None,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
-    def _persist(status: str) -> None:
+    def _persist(status: str, sections: list[dict]) -> None:
         """Save the current sections list to disk under the review session
-        we created upfront. Idempotent — overwrites the file each time."""
+        we created upfront. Idempotent — overwrites the file each time.
+
+        ``sections`` is passed explicitly because the list lives inside
+        ``_runner``'s scope; ``_persist`` is a sibling closure that
+        otherwise wouldn't see it.
+        """
         try:
             session = review_storage.load(review_id)
             if session is None:
@@ -738,44 +749,89 @@ def _start_review_thread(
                 msgs.append(ChatMessage(role="system", content=composed))
             return msgs
 
+        def gate_or_review(writer_text: str) -> None:
+            """Run static-analysis gates on the writer's latest output.
+            If any gate fails, append a `gates` section with the
+            failure messages and skip the reviewer for this round —
+            no point asking the domain reviewer to opine on code that
+            doesn't even parse. If gates pass (or there are no code
+            blocks to gate), call the reviewer as before.
+            """
+            blocks = extract_python_blocks(writer_text)
+            code = "\n\n".join(blocks)
+            results = run_gates(code) if code else []
+            if results and not gates_all_passed(results):
+                feedback = gates_format_for_writer(results)
+                section_idx = len(sections)
+                # Emit section_start so the UI renders the gate panel
+                # in real time, mirroring how live writer/reviewer
+                # sections appear.
+                job_manager.emit_event(
+                    job.id,
+                    "section_start",
+                    {"index": section_idx, "role": "gates", "model": "(static analysis)"},
+                    loop,
+                )
+                job_manager.append_chunk(job.id, feedback, loop)
+                sections.append({"role": "gates", "model": "(static analysis)", "text": feedback})
+                return
+
+            review_user = (
+                f"{REVIEWER_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
+                f"---\n\nCode under review:\n\n{writer_text}"
+            )
+            msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
+            text = run_section(role="reviewer", model=reviewer_model, messages=msgs)
+            sections.append({"role": "reviewer", "model": reviewer_model, "text": text})
+
+        def revise_user_message(prev_writer_text: str, feedback_section: dict) -> str:
+            """Build the writer's next prompt. Format depends on whether
+            the previous slot was a reviewer (domain feedback) or a
+            gates run (static-analysis feedback) — the writer needs
+            different framing for each."""
+            if feedback_section["role"] == "gates":
+                return (
+                    f"Your previous code failed static-analysis gates. "
+                    f"Fix every issue listed below and resubmit the FULL "
+                    f"corrected code in fenced markdown blocks. Do not add "
+                    f"prose unrelated to fixing these issues.\n\n"
+                    f"---\n\nOriginal task:\n{prompt}\n\n"
+                    f"---\n\nGate failures:\n\n{feedback_section['text']}\n\n"
+                    f"---\n\nYour previous code:\n\n{prev_writer_text}"
+                )
+            return (
+                f"{REVISE_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
+                f"---\n\nYour previous code:\n\n{prev_writer_text}\n\n"
+                f"---\n\nReviewer's notes:\n\n{feedback_section['text']}"
+            )
+
         try:
             # Round 0 — writer produces initial code
             writer_msgs = base_messages() + [ChatMessage(role="user", content=prompt)]
             writer_text = run_section(role="writer", model=writer_model, messages=writer_msgs)
             sections.append({"role": "writer", "model": writer_model, "text": writer_text})
 
-            # Round 1 — reviewer critiques
-            review_user = (
-                f"{REVIEWER_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
-                f"---\n\nCode under review:\n\n{writer_text}"
-            )
-            reviewer_msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
-            review_text = run_section(role="reviewer", model=reviewer_model, messages=reviewer_msgs)
-            sections.append({"role": "reviewer", "model": reviewer_model, "text": review_text})
+            # Round 1 — gates → reviewer (or gate failure stops here)
+            gate_or_review(writer_text)
 
-            # Subsequent rounds alternate writer/reviewer up to `rounds` total
+            # Subsequent rounds alternate writer revision / (gates → reviewer)
             for i in range(2, rounds):
                 if i % 2 == 0:
-                    # Writer revises
-                    revise_user = (
-                        f"{REVISE_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
-                        f"---\n\nYour previous code:\n\n{sections[-2]['text']}\n\n"
-                        f"---\n\nReviewer's notes:\n\n{sections[-1]['text']}"
+                    # Writer revises based on whatever the previous slot
+                    # was (reviewer notes OR gate failures).
+                    prev_writer = next(
+                        (s for s in reversed(sections) if s["role"] == "writer"),
+                        sections[0],
                     )
+                    revise_user = revise_user_message(prev_writer["text"], sections[-1])
                     msgs = base_messages() + [ChatMessage(role="user", content=revise_user)]
                     text = run_section(role="writer", model=writer_model, messages=msgs)
                     sections.append({"role": "writer", "model": writer_model, "text": text})
                 else:
-                    # Reviewer rounds 2 onwards: review the latest revision
-                    review_user = (
-                        f"{REVIEWER_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
-                        f"---\n\nLatest code:\n\n{sections[-1]['text']}"
-                    )
-                    msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
-                    text = run_section(role="reviewer", model=reviewer_model, messages=msgs)
-                    sections.append({"role": "reviewer", "model": reviewer_model, "text": text})
+                    # Gates → reviewer for the latest writer output.
+                    gate_or_review(sections[-1]["text"])
 
-            _persist("done")
+            _persist("done", sections)
             job_manager.finish(
                 job.id,
                 "done",
@@ -783,7 +839,7 @@ def _start_review_thread(
                 metadata={"kind": "review", "sections": sections, "review_id": review_id},
             )
         except _StopRequested as stop:
-            _persist("stopped")
+            _persist("stopped", sections)
             job_manager.finish(
                 job.id,
                 "stopped",
@@ -797,7 +853,7 @@ def _start_review_thread(
             )
         except Exception as exc:
             logger.exception("Review job %s failed", job.id)
-            _persist("error")
+            _persist("error", sections)
             job_manager.finish(
                 job.id,
                 "error",
