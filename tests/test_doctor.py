@@ -116,9 +116,16 @@ def test_check_agent_deps_when_module_absent(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_check_agent_deps_warns_when_packages_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When agent module IS importable but its deps aren't, WARN with fix hint."""
-    from app.agent import routes
-    monkeypatch.setattr(routes, "_missing_agent_deps", lambda: ["ddgs", "trafilatura"])
+    """When agent module IS importable but its deps aren't, WARN with fix hint.
+
+    Stubs a fake `app.agent.routes` in sys.modules so we don't actually
+    import the real one (which transitively imports fastapi — not in the
+    minimal CI test job)."""
+    import sys
+    import types
+    fake = types.ModuleType("app.agent.routes")
+    fake._missing_agent_deps = lambda: ["ddgs", "trafilatura"]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.agent.routes", fake)
     result = doctor.check_agent_deps()
     assert result.status == "warn"
     assert "ddgs" in result.detail
@@ -126,8 +133,11 @@ def test_check_agent_deps_warns_when_packages_missing(monkeypatch: pytest.Monkey
 
 
 def test_check_agent_deps_ok_when_all_importable(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.agent import routes
-    monkeypatch.setattr(routes, "_missing_agent_deps", lambda: [])
+    import sys
+    import types
+    fake = types.ModuleType("app.agent.routes")
+    fake._missing_agent_deps = lambda: []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.agent.routes", fake)
     result = doctor.check_agent_deps()
     assert result.status == "ok"
 
