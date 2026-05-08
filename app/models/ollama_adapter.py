@@ -8,11 +8,16 @@ from app.schemas.model import ModelKey
 
 
 class OllamaAdapter:
-    def __init__(self, model_key: ModelKey) -> None:
+    def __init__(self, model_key: str) -> None:
+        """``model_key`` is either one of the preset slots (granite /
+        gemma / qwen — resolved through Settings.model_map) or a raw
+        Ollama model name like ``qwen2.5-coder:32b``. Allowing both
+        lets the UI surface every installed model without forcing
+        each one to be declared as a slot in config."""
         self.settings = get_settings()
         self.client = Client(host=self.settings.ollama_host)
         self.model_key = model_key
-        self.model_name = self.settings.model_map[model_key]
+        self.model_name = self.settings.model_map.get(model_key, model_key)
 
     def _options(self, request: ChatRequest) -> dict:
         return {
