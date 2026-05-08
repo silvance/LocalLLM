@@ -47,6 +47,12 @@ from app.utils.hardware_info import (
     to_dict as hw_to_dict,
 )
 from app.utils.logger import setup_logger
+from app.utils.comparison_storage import (
+    ComparisonRun,
+    ComparisonStorage,
+    ModelOutput,
+    new_run as new_comparison_run,
+)
 from app.utils.review_storage import (
     ReviewSection,
     ReviewStorage,
@@ -68,11 +74,13 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _CHATS_DIR = Path("data/chats")
 _REVIEWS_DIR = Path("data/reviews")
+_COMPARISONS_DIR = Path("data/comparisons")
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 chat_service = ChatService()
 chat_storage = ChatStorage(_CHATS_DIR)
 review_storage = ReviewStorage(_REVIEWS_DIR)
+comparison_storage = ComparisonStorage(_COMPARISONS_DIR)
 job_manager = JobManager()
 
 
@@ -774,6 +782,202 @@ def _ollama_installed_models() -> list[str]:
         if n:
             names.append(n)
     return names
+
+
+# ---------------------------------------------------------------------------
+# Compare page (one prompt → multiple models, side-by-side)
+# ---------------------------------------------------------------------------
+
+def _start_compare_thread(
+    job: Job,
+    request_obj: ChatRequest,
+    model_key: str,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """One job per model. Streams content; on finish, attaches per-model
+    metrics (token counts, elapsed, tok/s) so the UI can show metadata."""
+    import time as _time
+    from contextlib import closing
+
+    def _runner() -> None:
+        try:
+            adapter = chat_service.adapters[model_key]
+            wall_started = _time.perf_counter()
+            prompt_tokens: int | None = None
+            completion_tokens: int | None = None
+            eval_duration_ns: int | None = None
+            total_duration_ns: int | None = None
+
+            with closing(adapter.stream_chat(request_obj)) as stream:
+                for chunk in stream:
+                    if job_manager.is_stop_requested(job.id):
+                        job_manager.finish(job.id, "stopped", loop, metadata={
+                            "model_key": model_key,
+                            "model_name": adapter.model_name,
+                        })
+                        return
+                    if chunk.content:
+                        job_manager.append_chunk(job.id, chunk.content, loop)
+                    if chunk.done:
+                        prompt_tokens = chunk.prompt_tokens
+                        completion_tokens = chunk.completion_tokens
+                        eval_duration_ns = chunk.eval_duration_ns
+                        total_duration_ns = chunk.total_duration_ns
+
+            wall_elapsed = _time.perf_counter() - wall_started
+            elapsed_s = (
+                total_duration_ns / 1_000_000_000
+                if total_duration_ns else wall_elapsed
+            )
+            tps = (
+                completion_tokens / (eval_duration_ns / 1_000_000_000)
+                if completion_tokens and eval_duration_ns else None
+            )
+            job_manager.finish(job.id, "done", loop, metadata={
+                "model_key": model_key,
+                "model_name": adapter.model_name,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "elapsed_s": elapsed_s,
+                "tokens_per_sec": tps,
+            })
+        except Exception as exc:
+            logger.exception("Compare run failed for model %s", model_key)
+            job_manager.finish(job.id, "error", loop, error=str(exc), metadata={
+                "model_key": model_key,
+            })
+
+    threading.Thread(
+        target=_runner, daemon=True, name=f"compare-{model_key}-{job.id[:8]}",
+    ).start()
+
+
+def _compare_summaries() -> list[dict]:
+    """Compact list rendering for the sidebar — preview + winner + timestamp."""
+    out = []
+    for r in comparison_storage.list_runs():
+        preview = r.prompt[:60] + ("…" if len(r.prompt) > 60 else "")
+        out.append({
+            "id": r.id,
+            "timestamp": r.timestamp,
+            "preview": preview,
+            "winner": r.winner,
+            "model_count": len(r.outputs),
+        })
+    return out
+
+
+@app.get("/compare", response_class=HTMLResponse)
+async def compare_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "compare.html",
+        {
+            "model_keys": list(chat_service.adapters.keys()),
+            "summaries": _compare_summaries(),
+            "tally": comparison_storage.winner_tally(),
+            "loaded": None,
+            "agent_enabled": _agent_enabled,
+        },
+    )
+
+
+@app.get("/compare/{run_id}", response_class=HTMLResponse)
+async def compare_load_page(run_id: str, request: Request):
+    loaded = comparison_storage.load(run_id)
+    if loaded is None:
+        raise HTTPException(404, f"comparison {run_id} not found")
+    return templates.TemplateResponse(
+        request,
+        "compare.html",
+        {
+            "model_keys": list(chat_service.adapters.keys()),
+            "summaries": _compare_summaries(),
+            "tally": comparison_storage.winner_tally(),
+            "loaded": dataclasses.asdict(loaded),
+            "agent_enabled": _agent_enabled,
+        },
+    )
+
+
+@app.delete("/compare/{run_id}")
+async def delete_compare(run_id: str) -> JSONResponse:
+    comparison_storage.delete(run_id)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/compare")
+async def start_compare(request: Request) -> JSONResponse:
+    """Spawn one job per requested model. The client subscribes to each
+    job's existing /api/jobs/{job_id}/stream endpoint to render columns
+    in parallel. Run id is server-generated so save round-trips can use it."""
+    body = await request.json()
+    prompt = (body.get("prompt") or "").strip()
+    system_prompt = (body.get("system_prompt") or "").strip()
+    requested = body.get("models") or []
+    if not prompt:
+        raise HTTPException(400, "empty prompt")
+    if not requested:
+        raise HTTPException(400, "no models selected")
+    available = chat_service.adapters
+    unknown = [m for m in requested if m not in available]
+    if unknown:
+        raise HTTPException(400, f"unknown model(s): {', '.join(unknown)}")
+
+    messages: list[ChatMessage] = []
+    if system_prompt:
+        messages.append(ChatMessage(role="system", content=system_prompt))
+    messages.append(ChatMessage(role="user", content=prompt))
+    chat_request = ChatRequest(messages=messages, stream=True)
+
+    loop = asyncio.get_running_loop()
+    run_id = new_comparison_run(prompt=prompt, system_prompt=system_prompt).id
+    jobs: list[dict] = []
+    for model_key in requested:
+        job = job_manager.create(
+            chat_id=f"compare:{run_id}",
+            request_data={"selection": model_key, "model_key": model_key},
+        )
+        _start_compare_thread(job, chat_request, model_key, loop)
+        jobs.append({"model_key": model_key, "job_id": job.id})
+
+    return JSONResponse({"run_id": run_id, "jobs": jobs})
+
+
+@app.post("/api/compare/save")
+async def save_compare(request: Request) -> JSONResponse:
+    """Persist a completed run. Client supplies the full payload (text +
+    metrics from each job's done event) — server doesn't aggregate from
+    JobManager because jobs may have been GC'd by now."""
+    body = await request.json()
+    run_id = body.get("run_id") or ""
+    prompt = (body.get("prompt") or "").strip()
+    system_prompt = (body.get("system_prompt") or "").strip()
+    raw_outputs = body.get("outputs") or []
+    winner = body.get("winner") or None
+    if not run_id or not prompt or not raw_outputs:
+        raise HTTPException(400, "missing run_id, prompt, or outputs")
+
+    run = ComparisonRun(
+        id=run_id,
+        timestamp=new_comparison_run("").timestamp,
+        prompt=prompt,
+        system_prompt=system_prompt,
+    )
+    for o in raw_outputs:
+        run.outputs.append(ModelOutput(
+            model_key=str(o.get("model_key") or ""),
+            model_name=str(o.get("model_name") or ""),
+            text=str(o.get("text") or ""),
+            prompt_tokens=o.get("prompt_tokens"),
+            completion_tokens=o.get("completion_tokens"),
+            elapsed_s=o.get("elapsed_s"),
+            tokens_per_sec=o.get("tokens_per_sec"),
+            error=o.get("error"),
+        ))
+    run.winner = winner if winner in {o.model_key for o in run.outputs} else None
+    comparison_storage.save(run)
+    return JSONResponse({"ok": True, "id": run.id})
 
 
 @app.get("/hardware", response_class=HTMLResponse)

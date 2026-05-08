@@ -73,3 +73,16 @@ def test_path_traversal_blocked(tmp_storage: ComparisonStorage) -> None:
 
 def test_load_unknown_id_returns_none(tmp_storage: ComparisonStorage) -> None:
     assert tmp_storage.load("nonexistent") is None
+
+
+def test_delete_removes_file(tmp_storage: ComparisonStorage) -> None:
+    run = new_run("delete me")
+    tmp_storage.save(run)
+    assert tmp_storage.load(run.id) is not None
+    tmp_storage.delete(run.id)
+    assert tmp_storage.load(run.id) is None
+
+
+def test_delete_unknown_id_is_noop(tmp_storage: ComparisonStorage) -> None:
+    # missing_ok=True under the hood — should not raise.
+    tmp_storage.delete("never-existed")

@@ -1,0 +1,174 @@
+/* Compare page: side-by-side model output columns. Reuses the sidebar
+   from main.css; the column grid is page-specific. */
+
+.compare-page {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  height: 100vh;
+}
+
+.compare-main {
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.4rem;
+  gap: 1rem;
+  overflow: hidden;
+}
+
+.compare-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+.compare-prompt label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.compare-prompt textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.6rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  resize: vertical;
+}
+.compare-actions {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+}
+.muted { color: var(--muted); font-size: 0.85rem; }
+
+.compare-columns {
+  flex: 1;
+  display: grid;
+  /* `auto-fit` lets up to N columns sit on a wide screen and wraps to a
+     single column on a narrow one without hardcoding a column count. */
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1rem;
+  overflow-y: auto;
+  padding-right: 0.4rem;
+}
+
+.compare-col {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-bg, #161b22);
+  overflow: hidden;
+  min-height: 320px;
+}
+.compare-col.running { border-color: var(--accent, #2f81f7); }
+.compare-col.errored { border-color: #f85149; }
+.compare-col header {
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+.compare-col header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.compare-col .model-name {
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: transparent;
+  padding: 0;
+}
+.compare-col .compare-meta {
+  padding: 0.3rem 0.8rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.compare-col .compare-meta .error { color: #ff7b72; }
+.compare-col .compare-body {
+  padding: 0.8rem;
+  white-space: pre-wrap;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  flex: 1;
+}
+.compare-col .compare-body.placeholder {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.compare-actions-after {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-bg, #161b22);
+  flex-shrink: 0;
+}
+#winner-picker {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+}
+#winner-picker legend {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-right: 0.6rem;
+}
+#winner-picker label {
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+#model-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.5rem;
+}
+
+.winner-tally {
+  margin: 0.6rem 0 0.4rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.winner-tally h2 {
+  margin: 0 0 0.3rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+}
+.winner-tally ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.winner-tally li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+}
+.winner-tally .count {
+  color: var(--muted);
+}

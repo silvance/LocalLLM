@@ -87,6 +87,9 @@ class ComparisonStorage:
         out.sort(key=lambda r: r.timestamp, reverse=True)
         return out
 
+    def delete(self, run_id: str) -> None:
+        self._path(run_id).unlink(missing_ok=True)
+
     def winner_tally(self) -> dict[str, int]:
         """Aggregate winner votes across all saved runs."""
         tally: dict[str, int] = {}

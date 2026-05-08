@@ -27,7 +27,6 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClie
     """A TestClient with chat storage rooted under tmp_path and the
     background generator stubbed so we don't try to reach Ollama."""
     monkeypatch.setenv("LOCALLLM_DATA_DIR", str(tmp_path))
-    # Re-import after env so module-level config picks up the override.
     import importlib
 
     from app import config
@@ -35,8 +34,12 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClie
 
     from app.web import app as web_app
     importlib.reload(web_app)
+    # Re-point the storage at tmp_path. The module-level singleton uses
+    # `Path("data/chats")` (relative cwd), which would write into the test
+    # runner's working directory — not what we want.
+    from app.utils.chat_storage import ChatStorage
+    web_app.chat_storage = ChatStorage(tmp_path / "chats")
 
-    # Stub out the generation thread — return a recognizable text.
     def _fake_thread(job, request_obj, selection, use_rag, loop):
         web_app.job_manager.append_chunk(job.id, "stubbed-response", loop)
         web_app.job_manager.finish(
@@ -69,7 +72,9 @@ def _seed_chat(client: TestClient) -> str:
 
 
 def _load_messages(tmp_path: Path, chat_id: str) -> list[dict]:
-    data = json.loads((tmp_path / "chats" / f"{chat_id}.json").read_text("utf-8"))
+    """Read the on-disk chat file (under the test fixture's chats/ root)."""
+    path = tmp_path / "chats" / f"{chat_id}.json"
+    data = json.loads(path.read_text("utf-8"))
     return data["messages"]
 
 

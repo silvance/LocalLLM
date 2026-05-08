@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LocalLLM — Compare</title>
+  <link rel="stylesheet" href="/static/main.css">
+  <link rel="stylesheet" href="/static/compare.css">
+</head>
+<body class="compare-page">
+  <aside class="sidebar">
+    <header>
+      <h1>LocalLLM</h1>
+      <a href="/" class="btn ghost block">← Back to chat</a>
+      <a href="/review" class="btn ghost block">⚖ Review (2-AI)</a>
+      <a href="/hardware" class="btn ghost block">🖥 Hardware</a>
+      {% if agent_enabled %}
+        <a href="/agent" class="btn ghost block">🌐 Agent</a>
+      {% endif %}
+    </header>
+
+    <section class="sessions">
+      <a href="/compare" class="btn primary block">+ New comparison</a>
+
+      {% if tally %}
+        <div class="winner-tally">
+          <h2>Winner tally</h2>
+          <ul>
+            {% for model_key, count in tally.items() %}
+              <li><span>{{ model_key }}</span><span class="count">{{ count }}</span></li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+
+      <ul class="chat-list">
+        {% for s in summaries %}
+          <li class="chat-row {% if loaded and s.id == loaded.id %}active{% endif %}">
+            <a href="/compare/{{ s.id }}" class="chat-link" title="{{ s.preview }}">
+              {{ s.preview }}
+              <span class="count">{% if s.winner %}🏆 {{ s.winner }}{% else %}{{ s.model_count }}m{% endif %}</span>
+            </a>
+            <button type="button" class="btn ghost del-compare"
+                    data-compare-id="{{ s.id }}" title="Delete this run">✕</button>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    <section class="settings">
+      <h2>Models</h2>
+      <div id="model-picker">
+        {% for k in model_keys %}
+          <label class="checkbox">
+            <input type="checkbox" class="model-checkbox" value="{{ k }}"
+              {% if not loaded or k in loaded.outputs|map(attribute='model_key')|list %}checked{% endif %}
+              {% if loaded %}disabled{% endif %}>
+            {{ k }}
+          </label>
+        {% endfor %}
+      </div>
+
+      <h2>Settings</h2>
+      <label>
+        System prompt (optional)
+        <textarea id="system-prompt" rows="4"
+          {% if loaded %}readonly{% endif %}>{% if loaded %}{{ loaded.system_prompt }}{% endif %}</textarea>
+      </label>
+    </section>
+  </aside>
+
+  <main class="compare-main">
+    <div class="compare-prompt">
+      <label for="compare-prompt-input">
+        Prompt
+        {% if loaded %}<span class="muted">(read-only — start a new comparison to edit)</span>{% endif %}
+      </label>
+      <textarea
+        id="compare-prompt-input"
+        rows="6"
+        {% if loaded %}readonly{% endif %}
+        placeholder="Paste a coding question, problem, or task here...">{% if loaded %}{{ loaded.prompt }}{% endif %}</textarea>
+      <div class="compare-actions">
+        <button type="button" id="run-compare" class="btn primary"
+                {% if loaded %}disabled{% endif %}>▶ Run comparison</button>
+        <span id="compare-status" class="muted"></span>
+      </div>
+    </div>
+
+    <div id="compare-columns" class="compare-columns">
+      {% if loaded %}
+        {% for o in loaded.outputs %}
+          <section class="compare-col" data-model-key="{{ o.model_key }}">
+            <header>
+              <h3>{{ o.model_key }} {% if loaded.winner == o.model_key %}🏆{% endif %}</h3>
+              <code class="model-name">{{ o.model_name }}</code>
+            </header>
+            <div class="compare-meta">
+              {% if o.error %}<span class="error">❌ {{ o.error }}</span>
+              {% else %}
+                ⏱ {{ "%.1f"|format(o.elapsed_s or 0) }}s
+                · in {{ o.prompt_tokens or "—" }}
+                · out {{ o.completion_tokens or "—" }}
+                {% if o.tokens_per_sec %}· {{ "%.1f"|format(o.tokens_per_sec) }} tok/s{% endif %}
+              {% endif %}
+            </div>
+            <div class="compare-body" data-raw="{{ o.text }}">{{ o.text }}</div>
+          </section>
+        {% endfor %}
+      {% endif %}
+    </div>
+
+    {% if not loaded %}
+      <div id="compare-actions-after" class="compare-actions-after hidden">
+        <fieldset id="winner-picker">
+          <legend>Pick the winner</legend>
+          <label><input type="radio" name="winner" value=""> none</label>
+          <!-- populated by JS once jobs complete -->
+        </fieldset>
+        <button type="button" id="save-compare" class="btn primary">💾 Save run</button>
+      </div>
+    {% endif %}
+  </main>
+
+  <script>
+    window.LOCALLLM = {
+      loadedId: {{ loaded.id|tojson if loaded else "null" }},
+    };
+  </script>
+  <script src="/static/compare.js"></script>
+</body>
+</html>
