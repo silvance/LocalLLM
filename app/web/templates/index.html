@@ -16,6 +16,7 @@
         <button type="submit" class="btn primary block">+ New chat</button>
       </form>
       <a href="/review" class="btn block ghost" style="display:block;text-align:center;text-decoration:none;margin-top:0.4rem;">⚖ Review (2-AI)</a>
+      <a href="/compare" class="btn block ghost" style="display:block;text-align:center;text-decoration:none;margin-top:0.4rem;">📊 Compare models</a>
       <a href="/hardware" class="btn block ghost" style="display:block;text-align:center;text-decoration:none;margin-top:0.4rem;">🖥 Hardware &amp; models</a>
       {% if agent_enabled %}
       <a href="/agent" class="btn block ghost" style="display:block;text-align:center;text-decoration:none;margin-top:0.4rem;">🌐 Agent (online)</a>
@@ -88,6 +89,11 @@
           <div class="message-header">
             <span class="role">{{ msg.role }}</span>
             <button type="button" class="btn ghost copy-msg" title="Copy message text">📋</button>
+            {% if msg.role == "user" %}
+              <button type="button" class="btn ghost edit-msg" title="Edit and re-run">✎</button>
+            {% elif msg.role == "assistant" %}
+              <button type="button" class="btn ghost regen-msg" title="Regenerate this response">↻</button>
+            {% endif %}
           </div>
           <div class="content" data-raw="{{ msg.content }}">{{ msg.content }}</div>
         </div>

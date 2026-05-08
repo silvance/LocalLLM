@@ -116,11 +116,42 @@ jobs:
           if ($out -match "ollama binary: \(not found\)") {
             throw "embedded ollama binary not bundled"
           }
-      - name: Upload artifact
+      - name: Smoke-check doctor subcommand
+        # Doctor is the operator's first-stop diagnostic. It must run to
+        # completion even on a fresh CI box (no models, no .env, etc.).
+        shell: pwsh
+        run: |
+          $out = & dist/LocalLLM.exe doctor
+          Write-Host $out
+          if ($out -notmatch "LocalLLM doctor") { throw "doctor preamble missing" }
+          if ($out -notmatch "Summary:") { throw "doctor summary line missing" }
+      - name: Upload single-file artifact
         uses: actions/upload-artifact@v4
         with:
           name: LocalLLM-windows-x64
           path: dist/LocalLLM.exe
+          if-no-files-found: error
+          retention-days: 30
+      - name: Build Inno Setup installer
+        # Inno Setup 6 ships pre-installed on windows-latest runners
+        # under "C:\Program Files (x86)\Inno Setup 6\ISCC.exe". We pass
+        # MyAppVersion so the artifact filename + uninstaller entry track
+        # the build (run number is monotonic, easy to correlate with CI).
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup 6 not found at $iscc — runner image changed?"
+          }
+          $version = "0.1.${{ github.run_number }}"
+          & $iscc /Qp "/DMyAppVersion=$version" installer/LocalLLM.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem installer/Output | Select-Object Name, Length | Format-Table
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalLLM-windows-installer
+          path: installer/Output/*.exe
           if-no-files-found: error
           retention-days: 30
 

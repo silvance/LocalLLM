@@ -105,10 +105,16 @@
     const el = document.createElement("div");
     el.className = `message ${role}`;
     el.dataset.role = role;
+    const actionBtn = role === "user"
+      ? `<button type="button" class="btn ghost edit-msg" title="Edit and re-run">✎</button>`
+      : role === "assistant"
+        ? `<button type="button" class="btn ghost regen-msg" title="Regenerate this response">↻</button>`
+        : "";
     el.innerHTML =
       `<div class="message-header">` +
         `<span class="role">${role}</span>` +
         `<button type="button" class="btn ghost copy-msg" title="Copy message text">📋</button>` +
+        actionBtn +
       `</div>` +
       `<div class="content"></div>`;
     const contentEl = el.querySelector(".content");
@@ -119,6 +125,117 @@
       contentEl.textContent = content;
     }
     return el;
+  }
+
+  // Body shared by send / regenerate / edit. Pulls from the sidebar
+  // controls so a request always reflects the current settings.
+  function currentRequestBody(extra) {
+    return Object.assign({
+      model_selection: $modelSelection.value,
+      use_rag: $useRag.checked,
+      system_prompt: $systemPrompt.value,
+      temperature: parseFloat($temperature.value),
+      max_tokens: parseInt($maxTokens.value, 10),
+      num_ctx: parseInt($numCtx.value, 10),
+    }, extra || {});
+  }
+
+  function messageIndex(messageEl) {
+    return Array.from($messages.querySelectorAll(".message")).indexOf(messageEl);
+  }
+
+  function removeMessagesFrom(index) {
+    Array.from($messages.querySelectorAll(".message"))
+      .slice(index)
+      .forEach((el) => el.remove());
+  }
+
+  async function regenerateAt(index) {
+    if (activeJobId) {
+      // Don't pile a regen on top of an in-flight stream.
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/chats/${chatId}/messages/${index}/regenerate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(currentRequestBody()),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        appendMessage("assistant", `Error: ${res.status} ${text}`);
+        return;
+      }
+      const data = await res.json();
+      // Drop the assistant message we're about to replace, then attach
+      // the new stream into the existing live-preview slot.
+      removeMessagesFrom(index);
+      subscribeToJob(data.job_id);
+    } catch (err) {
+      appendMessage("assistant", `Error: ${err}`);
+    }
+  }
+
+  function startEditAt(index, messageEl) {
+    if (messageEl.querySelector(".edit-form")) return;
+    const contentEl = messageEl.querySelector(".content");
+    const original = contentEl.dataset.raw || contentEl.textContent;
+    const form = document.createElement("form");
+    form.className = "edit-form";
+    form.innerHTML =
+      `<textarea class="edit-input" rows="3"></textarea>` +
+      `<div class="edit-actions">` +
+        `<button type="button" class="btn ghost edit-cancel">Cancel</button>` +
+        `<button type="submit" class="btn primary">Save and re-run</button>` +
+      `</div>`;
+    const textarea = form.querySelector(".edit-input");
+    textarea.value = original;
+    contentEl.classList.add("hidden");
+    messageEl.appendChild(form);
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+    const cleanup = () => {
+      form.remove();
+      contentEl.classList.remove("hidden");
+    };
+
+    form.querySelector(".edit-cancel").addEventListener("click", cleanup);
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const newText = textarea.value.trim();
+      if (!newText) return;
+      if (activeJobId) return;
+      try {
+        const res = await fetch(
+          `/api/chats/${chatId}/messages/${index}/edit`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(currentRequestBody({ content: newText })),
+          },
+        );
+        if (!res.ok) {
+          const text = await res.text();
+          appendMessage("assistant", `Error: ${res.status} ${text}`);
+          return;
+        }
+        const data = await res.json();
+        // Replace the user message in place + drop everything after,
+        // then start streaming the new response.
+        contentEl.dataset.raw = newText;
+        contentEl.textContent = newText;
+        cleanup();
+        removeMessagesFrom(index + 1);
+        subscribeToJob(data.job_id);
+      } catch (err) {
+        appendMessage("assistant", `Error: ${err}`);
+      }
+    });
   }
 
   function appendMessage(role, content) {
@@ -177,9 +294,48 @@
       const finalText = (status === "stopped")
         ? `${text.trim()}\n\n_[stopped]_`
         : text;
-      appendMessage("assistant", finalText);
+      const el = appendMessage("assistant", finalText);
+      attachCitations(el, metadata);
     }
     hideStreaming();
+  }
+
+  // Citation panel attached below an assistant message. Not persisted —
+  // a page refresh drops them (the chat storage only holds role/content),
+  // which is fine since the user just saw them stream in.
+  function attachCitations(messageEl, metadata) {
+    const retrievals = metadata && metadata.retrievals;
+    if (!retrievals || !retrievals.length) return;
+    const panel = document.createElement("details");
+    panel.className = "citations";
+    const summary = document.createElement("summary");
+    summary.textContent = `📚 ${retrievals.length} source${retrievals.length === 1 ? "" : "s"}`;
+    panel.appendChild(summary);
+    const list = document.createElement("ol");
+    retrievals.forEach((r) => {
+      const li = document.createElement("li");
+      const head = document.createElement("div");
+      head.className = "citation-head";
+      const path = document.createElement("code");
+      path.textContent = `${r.source_id}/${r.file_path}`;
+      head.appendChild(path);
+      if (typeof r.score === "number") {
+        const score = document.createElement("span");
+        score.className = "citation-score";
+        score.textContent = `score=${r.score.toFixed(2)}`;
+        head.appendChild(score);
+      }
+      li.appendChild(head);
+      if (r.snippet) {
+        const pre = document.createElement("pre");
+        pre.className = "citation-snippet";
+        pre.textContent = r.snippet;
+        li.appendChild(pre);
+      }
+      list.appendChild(li);
+    });
+    panel.appendChild(list);
+    messageEl.appendChild(panel);
   }
 
   function renderMeta(metadata) {
@@ -261,21 +417,11 @@
     appendMessage("user", content);
     $input.value = "";
 
-    const body = {
-      content,
-      model_selection: $modelSelection.value,
-      use_rag: $useRag.checked,
-      system_prompt: $systemPrompt.value,
-      temperature: parseFloat($temperature.value),
-      max_tokens: parseInt($maxTokens.value, 10),
-      num_ctx: parseInt($numCtx.value, 10),
-    };
-
     try {
       const res = await fetch(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(currentRequestBody({ content })),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -346,6 +492,18 @@
       const codeEl = block.querySelector("pre code");
       const ok = await copyToClipboard(codeEl.textContent);
       if (ok) flashCopied(target);
+      return;
+    }
+    if (target.classList.contains("regen-msg")) {
+      const msg = target.closest(".message");
+      const idx = messageIndex(msg);
+      if (idx >= 0) regenerateAt(idx);
+      return;
+    }
+    if (target.classList.contains("edit-msg")) {
+      const msg = target.closest(".message");
+      const idx = messageIndex(msg);
+      if (idx >= 0) startEditAt(idx, msg);
       return;
     }
   });

@@ -40,6 +40,19 @@
   </aside>
 
   <main class="agent">
+    {% if missing_deps %}
+      <div class="deps-banner" role="alert">
+        <strong>Agent tools are unavailable.</strong>
+        These Python packages aren't installed:
+        <code>{{ missing_deps|join(', ') }}</code>.
+        Run this in the LocalLLM venv (or wherever uvicorn was launched from):
+        <pre>pip install -r requirements-agent.txt</pre>
+        then reload this page. Without these, <code>web_search</code> and
+        <code>http_fetch</code> will fail and the model may fabricate
+        answers from its prior knowledge instead of citing real sources.
+      </div>
+    {% endif %}
+
     <div class="agent-prompt">
       <label for="agent-prompt-input">Research prompt</label>
       <textarea
@@ -47,7 +60,8 @@
         rows="5"
         placeholder="e.g. What's the current state of CVE-2024-XXXX, and which Linux distros have patched it?"></textarea>
       <div class="agent-actions">
-        <button type="button" id="run-agent" class="btn primary">▶ Run</button>
+        <button type="button" id="run-agent" class="btn primary"
+                {% if missing_deps %}disabled title="Install requirements-agent.txt first"{% endif %}>▶ Run</button>
         <span id="agent-status" class="muted-note"></span>
       </div>
     </div>

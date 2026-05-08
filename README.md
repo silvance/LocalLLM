@@ -14,22 +14,20 @@ A Streamlit chat app over local Ollama models with retrieval-augmented generatio
 - **UI** — Streamlit app with a side-by-side `Compare Models` page
 - **Airgap deploy** — `scripts/build_bundle.py` produces a self-contained directory for sneakernet to a target Windows machine
 
-## Quickstart (home machine)
+## Quickstart (home machine, from source)
 
 ```powershell
 # 1. Install Ollama and pull models
 ollama pull granite4 gemma4 qwen3-coder:30b nomic-embed-text
 
-# 2. Python deps (Python 3.8-3.13 supported)
-pip install -r requirements.txt
+# 2. Create the venv + install ALL Python deps in one shot.
+#    This is the "from source" setup — distinct from the bundle's
+#    install.bat, which targets the prebuilt LocalLLM.exe and has
+#    its deps baked in.
+powershell -ExecutionPolicy Bypass -File scripts\dev-setup.ps1
+# Linux/macOS: ./scripts/dev-setup.sh
 
-# 3. (Optional) AST-aware code chunking for the RAG indexer.
-#    Only available on Python 3.8-3.12 (tree-sitter-languages 1.10.x has
-#    no wheels for newer Python). Without it, indexing falls back to a
-#    regex-based recursive splitter, which is fine.
-pip install -r requirements-extras.txt
-
-# 4. Configure
+# 3. Configure
 Copy-Item .env.example .env
 
 # 4. (Optional) Build the RAG corpus
@@ -37,8 +35,15 @@ python scripts/fetch_corpus.py --tiers 1
 python scripts/build_index.py
 
 # 5. Run
-streamlit run app/main.py
+.\.venv\Scripts\Activate.ps1
+python scripts/run_web.py        # FastAPI UI on http://127.0.0.1:8000
 ```
+
+`scripts/dev-setup.ps1` installs `requirements.txt` + `requirements-agent.txt`
++ `requirements-extras.txt`. Pass `-NoAgent` to skip the online `/agent`
+deps if you don't plan to use that page; pass `-NoExtras` to skip the
+tree-sitter packages used for AST-aware code chunking. Re-run after every
+`git pull` to pick up new dependencies.
 
 ## Building the airgap bundle
 

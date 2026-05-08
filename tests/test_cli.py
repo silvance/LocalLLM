@@ -28,6 +28,7 @@ EXPECTED_SUBCOMMANDS = {
     "build-index",
     "fetch-corpus",
     "version",
+    "doctor",
 }
 
 

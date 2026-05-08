@@ -29,6 +29,19 @@ class FakeChatClient:
         return {"message": self.scripted.pop(0)}
 
 
+def test_system_prompt_forbids_fabrication_on_tool_error() -> None:
+    """Regression guard: when both tools fail, the model used to make up
+    plausible CVE numbers + URLs from prior knowledge. The system prompt
+    must explicitly forbid that and require an error-report final answer."""
+    p = SYSTEM_PROMPT.lower()
+    # The guidance must mention error results, the no-fabrication rule,
+    # and the report-the-error fallback. Keeping these as substring checks
+    # so wording can drift without breaking the test.
+    assert '"error"' in SYSTEM_PROMPT
+    assert "fabricate" in p or "invent" in p
+    assert "cve" in p  # specific examples must appear so the model takes them seriously
+
+
 def test_coerce_args_handles_dict_string_and_garbage() -> None:
     assert _coerce_args({"a": 1}) == {"a": 1}
     assert _coerce_args('{"a": 2}') == {"a": 2}
