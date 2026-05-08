@@ -528,9 +528,9 @@
   // re-attach the SSE stream. The /api/jobs/{id}/stream endpoint
   // replays buffered text + checkpoints so section_start markers and
   // partial sections render correctly even though we joined late.
-  const activeJobId = window.LOCALLLM && window.LOCALLLM.activeJobId;
-  if (activeJobId) {
-    subscribe(activeJobId);
+  const initialJobId = window.LOCALLLM && window.LOCALLLM.activeJobId;
+  if (initialJobId) {
+    subscribe(initialJobId);
   }
 
   // Visible "I am alive" probe so a broken JS init doesn't look the same

@@ -70,19 +70,37 @@
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 0.6rem;
 }
 .compare-col header h3 {
   margin: 0;
   font-size: 1rem;
   font-weight: 600;
+  /* Title takes the slack; meta + button stay snug on the right. */
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .compare-col .model-name {
   font-size: 0.78rem;
   color: var(--muted);
   background: transparent;
   padding: 0;
+}
+.compare-col .copy-pane {
+  font-size: 0.85rem;
+  padding: 0.2rem 0.45rem;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+.compare-col:hover .copy-pane {
+  opacity: 0.85;
+}
+.compare-col .copy-pane:hover {
+  opacity: 1;
 }
 .compare-col .compare-meta {
   padding: 0.3rem 0.8rem;

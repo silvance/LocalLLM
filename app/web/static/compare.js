@@ -5,6 +5,31 @@
 // in parallel. On every job's `done` event we capture text + metrics.
 // Once all jobs settle, the winner picker + save button appear.
 (function () {
+  // Copy-pane click delegation — wired before the saved-run early-return
+  // so it works in BOTH the saved-run view-only mode (Jinja-rendered
+  // buttons) and the live-run mode (JS-rendered buttons). Uses the
+  // column's body.dataset.raw — set on `done` for live streams and by
+  // the template for loaded runs — so copy works in either mode.
+  const $columnsEl = document.getElementById("compare-columns");
+  if ($columnsEl) {
+    $columnsEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".copy-pane");
+      if (!btn) return;
+      const col = btn.closest(".compare-col");
+      if (!col) return;
+      const body = col.querySelector(".compare-body");
+      const text = body.dataset.raw || body.textContent || "";
+      try {
+        await navigator.clipboard.writeText(text);
+        const original = btn.textContent;
+        btn.textContent = "✓";
+        setTimeout(() => { btn.textContent = original; }, 1100);
+      } catch (err) {
+        console.warn("copy-pane failed", err);
+      }
+    });
+  }
+
   const loadedId = window.LOCALLLM && window.LOCALLLM.loadedId;
   if (loadedId) {
     // View-only mode for a saved run — just hydrate raw text.
@@ -46,7 +71,11 @@
     col.className = "compare-col running";
     col.dataset.modelKey = modelKey;
     col.innerHTML =
-      `<header><h3>${modelKey}</h3><code class="model-name">…</code></header>` +
+      `<header>` +
+        `<h3>${modelKey}</h3>` +
+        `<code class="model-name">…</code>` +
+        `<button type="button" class="btn ghost copy-pane" title="Copy this pane">📋</button>` +
+      `</header>` +
       `<div class="compare-meta">⏳ running…</div>` +
       `<div class="compare-body placeholder">Waiting for first token…</div>`;
     $columns.appendChild(col);
