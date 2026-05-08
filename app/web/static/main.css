@@ -26,16 +26,17 @@ body {
   height: 100vh;
   overflow: hidden;
 }
-/* Sidebar collapsed: drop the column entirely so the chat reflows
-   to single-column. display:none on .sidebar keeps it out of grid
-   placement (visibility:hidden left a 0-wide track which some
-   browsers laid out unevenly with our other fixed elements). */
-body.sidebar-collapsed {
-  grid-template-columns: 1fr;
-}
-body.sidebar-collapsed .sidebar {
-  display: none;
-}
+/* Pin the sidebar/main to specific grid cells. Default auto-placement
+   stuffs items in DOM order, but the sidebar-toggle button (which
+   should be `position: fixed` and out of flow) was being given a
+   grid cell on some Chromium builds, shoving everything else over
+   by one. Explicit grid-column/grid-row makes that a non-issue. */
+body > .sidebar { grid-column: 1; grid-row: 1; }
+body > main      { grid-column: 2; grid-row: 1; }
+
+body.sidebar-collapsed { grid-template-columns: 1fr; }
+body.sidebar-collapsed > .sidebar { display: none; }
+body.sidebar-collapsed > main { grid-column: 1; }
 
 /* Sidebar collapse / expand toggle — a small floating button at the
    top-left of the viewport. Always visible regardless of state so
