@@ -49,6 +49,28 @@
     ).join("");
   }
 
+  // Pull a `pip install` (or similar) command out of an error message so we
+  // can render it as a copy-friendly hint. The web_search / http_fetch
+  // tools format their import-error messages as: "...; run `pip install
+  // -r requirements-agent.txt`" — match that pattern, but be lenient.
+  function extractInstallHint(text) {
+    const m = String(text || "").match(/run\s+`([^`]+)`/i);
+    return m ? m[1] : "";
+  }
+
+  function renderToolError(error) {
+    const hint = extractInstallHint(error);
+    let body = escapeHtml(error || "(no detail)");
+    if (hint) {
+      body +=
+        `<div class="install-hint">` +
+          `<span>Install hint:</span>` +
+          `<code>${escapeHtml(hint)}</code>` +
+        `</div>`;
+    }
+    return body;
+  }
+
   function renderFetchResult(r) {
     const meta = `<div class="fetch-meta">HTTP ${escapeHtml(r.status)} · ${escapeHtml(r.chars)} chars${r.truncated ? " (truncated)" : ""}` +
                  (r.title ? ` · ${escapeHtml(r.title)}` : "") + `</div>`;
@@ -140,7 +162,7 @@
 
     src.addEventListener("tool_error", (e) => {
       const d = JSON.parse(e.data);
-      appendEvent("tool-error", `× tool failed: ${d.name}`, escapeHtml(d.error || ""));
+      appendEvent("tool-error", `× tool failed: ${d.name}`, renderToolError(d.error || ""));
     });
 
     src.addEventListener("error", (e) => {

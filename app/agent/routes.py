@@ -29,6 +29,24 @@ agent_static = StaticFiles(directory=str(_STATIC_DIR))
 router = APIRouter()
 
 
+def _missing_agent_deps() -> list[str]:
+    """Return the list of agent-tool packages that aren't importable.
+
+    Surfaces install issues at /agent page load instead of waiting for
+    a tool to fail mid-loop with a buried stack trace. The packages
+    here mirror requirements-agent.txt; the names are the *import* names
+    (which sometimes differ from pip names — none do here, but check
+    `import` not `pip show`).
+    """
+    missing: list[str] = []
+    for module_name in ("ddgs", "trafilatura", "httpx"):
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(module_name)
+    return missing
+
+
 @router.get("/agent", response_class=HTMLResponse)
 async def agent_page(request: Request):
     return agent_templates.TemplateResponse(
@@ -37,6 +55,7 @@ async def agent_page(request: Request):
         {
             "settings": settings,
             "model_options": ["granite", "gemma", "qwen"],
+            "missing_deps": _missing_agent_deps(),
         },
     )
 
@@ -45,6 +64,17 @@ async def agent_page(request: Request):
 async def start_agent(request: Request) -> JSONResponse:
     # Late binding to avoid an import cycle with app.web.app
     from app.web.app import chat_service, job_manager
+
+    missing = _missing_agent_deps()
+    if missing:
+        # Return 503 rather than starting a doomed loop — the model would
+        # otherwise see only tool errors and (per past observation) make
+        # up plausible-looking facts to compensate.
+        raise HTTPException(
+            503,
+            f"agent tools unavailable: missing {', '.join(missing)}. "
+            f"Run `pip install -r requirements-agent.txt` and reload.",
+        )
 
     body = await request.json()
     prompt = (body.get("prompt") or "").strip()

@@ -105,6 +105,33 @@ def test_check_hardware_returns_ok() -> None:
     assert "tier=" in result.detail
 
 
+def test_check_agent_deps_when_module_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If app.agent isn't on disk (airgap build), the check is informational."""
+    import sys
+    # Force the import to fail by stashing a None entry.
+    monkeypatch.setitem(sys.modules, "app.agent.routes", None)
+    result = doctor.check_agent_deps()
+    assert result.status == "ok"
+    assert "airgap" in result.detail or "not present" in result.detail
+
+
+def test_check_agent_deps_warns_when_packages_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When agent module IS importable but its deps aren't, WARN with fix hint."""
+    from app.agent import routes
+    monkeypatch.setattr(routes, "_missing_agent_deps", lambda: ["ddgs", "trafilatura"])
+    result = doctor.check_agent_deps()
+    assert result.status == "warn"
+    assert "ddgs" in result.detail
+    assert "pip install" in result.fix
+
+
+def test_check_agent_deps_ok_when_all_importable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.agent import routes
+    monkeypatch.setattr(routes, "_missing_agent_deps", lambda: [])
+    result = doctor.check_agent_deps()
+    assert result.status == "ok"
+
+
 # ---------------------------------------------------------------------------
 # Runner / render
 # ---------------------------------------------------------------------------

@@ -86,6 +86,19 @@ Constraints:
 - If a fetch fails, try a different URL — don't keep retrying the same one.
 - Don't invent URLs. Only fetch URLs returned by web_search.
 - If you already know the answer with confidence, skip the tools and answer.
+
+CRITICAL — when tools return an error:
+- Tool results that look like {"error": "..."} mean the tool DID NOT WORK
+  and produced NO data. You have nothing to cite from that call.
+- Do NOT fabricate concrete facts (CVE IDs, version numbers, dates, names,
+  URLs, statistics, quotes) to fill the gap. Inventing specifics is worse
+  than admitting you couldn't access the data.
+- If every tool call you've made has returned an error, your final answer
+  MUST be a short report that states (a) what you tried, (b) the exact
+  error message you got, and (c) what the operator should do to fix it
+  (usually quoted verbatim from the error). Then stop.
+- If only some tool calls failed but at least one returned real data, you
+  may answer using that data — but only cite sources you actually fetched.
 """
 
 

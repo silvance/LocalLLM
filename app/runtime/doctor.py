@@ -194,6 +194,26 @@ def check_hardware() -> CheckResult:
     )
 
 
+def check_agent_deps() -> CheckResult:
+    """Optional packages for the online /agent page (ddgs / trafilatura /
+    httpx). WARN-level — the airgap deploy doesn't ship the agent module
+    and shouldn't have these installed."""
+    # No agent module on disk → check is irrelevant (airgap build).
+    try:
+        from app.agent.routes import _missing_agent_deps  # type: ignore
+    except ImportError:
+        return CheckResult("agent deps", "ok", "agent module not present (airgap build)")
+    missing = _missing_agent_deps()
+    if not missing:
+        return CheckResult("agent deps", "ok", "all importable")
+    return CheckResult(
+        "agent deps",
+        "warn",
+        f"missing: {', '.join(missing)} — /agent will refuse to run",
+        fix="Run `pip install -r requirements-agent.txt` in the venv that runs uvicorn.",
+    )
+
+
 def check_port_free() -> CheckResult:
     """The default app port (8000) is free, or another LocalLLM is running on it.
 
@@ -221,6 +241,7 @@ DEFAULT_CHECKS: tuple[Callable[[], CheckResult], ...] = (
     check_ollama_reachable,
     check_models_on_disk,
     check_rag_index,
+    check_agent_deps,
     check_port_free,
 )
 

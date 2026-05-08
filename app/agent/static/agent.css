@@ -88,8 +88,51 @@
 .agent-event.kind-tool-call .event-header { color: #d29922; }
 .agent-event.kind-tool-result .event-header { color: #7ed98a; }
 .agent-event.kind-tool-error .event-header { color: var(--warn); }
+.agent-event.kind-tool-error .event-body {
+  background: rgba(248, 81, 73, 0.08);
+  border-left: 3px solid var(--warn, #f85149);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+.agent-event.kind-tool-error .install-hint {
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.agent-event.kind-tool-error .install-hint code {
+  background: transparent;
+  padding: 0;
+  font-weight: 600;
+}
 .agent-event.kind-error .event-header { color: var(--warn); }
 .agent-event.kind-final .event-header { color: var(--assistant); }
+
+.deps-banner {
+  margin: 0 0 1rem 0;
+  padding: 0.8rem 1rem;
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid var(--warn, #f85149);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.deps-banner code {
+  padding: 0.05rem 0.3rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 3px;
+}
+.deps-banner pre {
+  margin: 0.4rem 0 0;
+  padding: 0.4rem 0.6rem;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 3px;
+  overflow-x: auto;
+}
 
 .agent-event details {
   margin-top: 0.4rem;
