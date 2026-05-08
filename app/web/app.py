@@ -74,6 +74,7 @@ from app.utils.review_storage import (
     ReviewStorage,
     new_session as new_review_session,
 )
+from app.utils.system_prompt import compose as compose_system_prompt
 from app.web.job_manager import Job, JobManager
 
 
@@ -362,8 +363,9 @@ async def _kick_off_generation(session: ChatSession, body: dict) -> str:
     num_ctx = body.get("num_ctx")
 
     request_messages: list[ChatMessage] = []
-    if system_prompt:
-        request_messages.append(ChatMessage(role="system", content=system_prompt))
+    composed_system = compose_system_prompt(system_prompt)
+    if composed_system:
+        request_messages.append(ChatMessage(role="system", content=composed_system))
     request_messages.extend(session.messages)
 
     chat_request = ChatRequest(
@@ -731,8 +733,9 @@ def _start_review_thread(
 
         def base_messages() -> list[ChatMessage]:
             msgs: list[ChatMessage] = []
-            if system_prompt:
-                msgs.append(ChatMessage(role="system", content=system_prompt))
+            composed = compose_system_prompt(system_prompt)
+            if composed:
+                msgs.append(ChatMessage(role="system", content=composed))
             return msgs
 
         try:
@@ -972,8 +975,9 @@ async def start_compare(request: Request) -> JSONResponse:
         raise HTTPException(400, f"unknown model(s): {', '.join(unknown)}")
 
     messages: list[ChatMessage] = []
-    if system_prompt:
-        messages.append(ChatMessage(role="system", content=system_prompt))
+    composed_system = compose_system_prompt(system_prompt)
+    if composed_system:
+        messages.append(ChatMessage(role="system", content=composed_system))
     messages.append(ChatMessage(role="user", content=prompt))
     chat_request = ChatRequest(messages=messages, stream=True)
 

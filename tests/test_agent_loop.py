@@ -29,6 +29,23 @@ class FakeChatClient:
         return {"message": self.scripted.pop(0)}
 
 
+def test_run_agent_includes_baseline_in_system_message() -> None:
+    """The agent's first system message must include the always-on
+    anti-hallucination baseline AND the agent's research-loop prompt.
+    Regression guard for the centralized compose() wiring."""
+    from app.utils.system_prompt import BASELINE
+    client = FakeChatClient([
+        {"role": "assistant", "content": "answer."},
+    ])
+    run_agent("question?", chat_client=client, model="granite")
+    sent = client.calls[0]
+    sys_content = sent["messages"][0]["content"]
+    assert sent["messages"][0]["role"] == "system"
+    assert "Calibration" in sys_content  # from BASELINE
+    assert "research agent" in sys_content  # from agent SYSTEM_PROMPT
+    assert sys_content.index(BASELINE.strip().splitlines()[0]) < sys_content.index("research agent")
+
+
 def test_system_prompt_forbids_fabrication_on_tool_error() -> None:
     """Regression guard: when both tools fail, the model used to make up
     plausible CVE numbers + URLs from prior knowledge. The system prompt
@@ -66,7 +83,9 @@ def test_run_agent_returns_immediately_on_no_tool_calls() -> None:
     sent = client.calls[0]
     assert sent["model"] == "granite"
     assert sent["messages"][0]["role"] == "system"
-    assert sent["messages"][0]["content"] == SYSTEM_PROMPT
+    # Substring rather than exact equality — the always-on baseline
+    # prompt is now prepended (see test_run_agent_includes_baseline_in_system_message).
+    assert SYSTEM_PROMPT.strip() in sent["messages"][0]["content"]
     assert sent["messages"][1]["role"] == "user"
     assert sent["tools"] == TOOL_SCHEMAS
     # Events: step_start, model_text, done
