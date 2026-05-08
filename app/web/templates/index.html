@@ -6,6 +6,17 @@
   <link rel="stylesheet" href="/static/main.css">
 </head>
 <body>
+  <script>
+    /* Apply sidebar collapse state before paint to avoid layout flash. */
+    try {
+      if (localStorage.getItem("localllm.sidebarCollapsed") === "1") {
+        document.body.classList.add("sidebar-collapsed");
+      }
+    } catch (_) {}
+  </script>
+  <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar">
+    <span class="icon-open">≡</span><span class="icon-close">»</span>
+  </button>
   <aside class="sidebar">
     <header>
       <h1>LocalLLM</h1>
@@ -128,6 +139,7 @@
       activeJobId: {{ active_job_id | tojson }},
     };
   </script>
+  <script src="/static/sidebar.js"></script>
   <script src="/static/main.js"></script>
 </body>
 </html>

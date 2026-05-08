@@ -7,6 +7,16 @@
   <link rel="stylesheet" href="/agent-static/agent.css">
 </head>
 <body class="agent-page">
+  <script>
+    try {
+      if (localStorage.getItem("localllm.sidebarCollapsed") === "1") {
+        document.body.classList.add("sidebar-collapsed");
+      }
+    } catch (_) {}
+  </script>
+  <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar">
+    <span class="icon-open">≡</span><span class="icon-close">»</span>
+  </button>
   <aside class="sidebar">
     <header>
       <h1>LocalLLM</h1>
@@ -69,6 +79,7 @@
     <div id="agent-stream" class="agent-stream"></div>
   </main>
 
+  <script src="/static/sidebar.js"></script>
   <script src="/agent-static/agent.js"></script>
 </body>
 </html>
