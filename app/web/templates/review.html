@@ -62,6 +62,18 @@
         </select>
       </label>
       <label>
+        Fallback writer (optional)
+        <select id="fallback-writer-model">
+          <option value="">(none)</option>
+          {% for m in model_options %}
+            <option value="{{ m }}">{{ m }}</option>
+          {% endfor %}
+        </select>
+        <span class="muted-note" style="font-size:0.7rem;">
+          Takes over after 2 consecutive gate failures from the primary writer.
+        </span>
+      </label>
+      <label>
         Rounds
         <input type="number" id="rounds" min="2" max="6" value="{{ loaded.rounds if loaded else 3 }}">
       </label>

@@ -74,6 +74,11 @@ from app.services.review_gates import (
     format_for_writer as gates_format_for_writer,
     run_gates,
 )
+from app.services.reviewer_verdict import (
+    SCHEMA_INSTRUCTION as REVIEWER_VERDICT_SCHEMA,
+    ReviewerVerdict,
+    parse as parse_reviewer_verdict,
+)
 from app.utils.code_linter import extract_python_blocks
 from app.utils.review_storage import (
     ReviewSection,
@@ -256,7 +261,7 @@ async def chat_page(chat_id: str, request: Request):
             "chat": session,
             "summaries": summaries,
             "settings": settings,
-            "model_options": ["auto", "granite", "gemma", "qwen"],
+            "model_options": _model_choices(),
             "active_job_id": active_job_id,
             "agent_enabled": _agent_enabled,
         },
@@ -492,13 +497,46 @@ def _sse(event: str, data: dict) -> bytes:
 # ---------------------------------------------------------------------------
 
 REVIEWER_INSTRUCTION = (
-    "You are a senior code reviewer. Review the following code for problems "
-    "that would prevent it from running cleanly: missing imports, undefined "
-    "names, dataclass misuse, attribute references that don't exist on the "
-    "class, broken control flow, security footguns, and any other concrete "
-    "bugs. List issues briefly and specifically — line refs or quoted "
-    "snippets where helpful. Do not rewrite the code yourself; just call out "
-    "what's wrong."
+    "You are a senior code reviewer for security/forensics tooling. "
+    "Review the code under review for two classes of problem.\n\n"
+
+    "## Class 1: code-correctness bugs\n"
+    "Missing imports, undefined names, dataclass misuse, attribute "
+    "references that don't exist on the class, broken control flow, "
+    "wrong exception types, security footguns (subprocess shell=True, "
+    "yaml.load without SafeLoader, eval, pickle on untrusted input), "
+    "concurrency hazards, etc.\n\n"
+
+    "## Class 2: domain / hardware / protocol grounding\n"
+    "Verify the implementation is actually possible on the stated "
+    "hardware and OS — this is where local code-gen models hallucinate "
+    "the loudest. Specifically flag any of these:\n\n"
+    "- BLE / Bluetooth packets being sniffed, decoded, or transmitted "
+    "from a Wi-Fi interface (wlan0, mon0, wlp*, en*, anything in monitor "
+    "mode for 802.11). BLE goes through HCI / btmon / BlueZ on Linux, "
+    "Core Bluetooth on macOS, the Microsoft Bluetooth stack on Windows. "
+    "It cannot be sniffed from a Wi-Fi card.\n"
+    "- 802.11 monitor-mode operations (airodump-ng, scapy.sniff on a "
+    "wlan iface, deauth frames) being driven via Bluetooth / HCI APIs.\n"
+    "- SDR work (RTL-SDR, HackRF, BladeRF) being attempted via socket / "
+    "raw network APIs instead of the SDR's actual driver (pyrtlsdr, "
+    "soapy, GNU Radio, etc.).\n"
+    "- USB peripheral access via /dev/ttyUSB* or pyserial when the "
+    "device speaks HID, libusb, or a vendor protocol.\n"
+    "- Linux-only paths (/proc, /sys, iw, hcitool, ip-link) used "
+    "without a Windows or macOS branch when the original task didn't "
+    "pin an OS.\n"
+    "- Privilege assumptions (root, CAP_NET_RAW, CAP_NET_ADMIN) used "
+    "without acknowledging them.\n"
+    "- Network-namespace / monitor-mode / promiscuous-mode commands run "
+    "without a clear teardown so the user's interface stays in a "
+    "broken state.\n"
+    "- Protocols / standards confused with each other (Zigbee vs "
+    "Thread vs Z-Wave; LoRa vs LoRaWAN; UART vs SPI vs I²C).\n\n"
+
+    "List every issue briefly and specifically — line refs or quoted "
+    "snippets where helpful. Do not rewrite the code yourself; just "
+    "call out what's wrong."
 )
 REVISE_INSTRUCTION = (
     "You wrote the following code. A reviewer identified the issues below. "
@@ -556,7 +594,7 @@ def _render_review_page(request: Request, loaded, active_job_id=None) -> HTMLRes
         "review.html",
         {
             "settings": settings,
-            "model_options": ["auto", "granite", "gemma", "qwen"],
+            "model_options": _model_choices(),
             "summaries": summaries,
             "loaded": loaded,
             "active_job_id": active_job_id,
@@ -602,6 +640,7 @@ async def start_review(request: Request) -> JSONResponse:
 
     writer_model = body.get("writer_model") or "qwen"
     reviewer_model = body.get("reviewer_model") or "gemma"
+    fallback_writer_model = (body.get("fallback_writer_model") or "").strip() or None
     rounds = int(body.get("rounds") or 3)
     if rounds < 2:
         raise HTTPException(400, "rounds must be at least 2 (write + review)")
@@ -636,6 +675,7 @@ async def start_review(request: Request) -> JSONResponse:
         prompt=prompt,
         writer_model=writer_model,
         reviewer_model=reviewer_model,
+        fallback_writer_model=fallback_writer_model,
         rounds=rounds,
         system_prompt=system_prompt,
         temperature=temperature,
@@ -644,6 +684,17 @@ async def start_review(request: Request) -> JSONResponse:
         loop=loop,
     )
     return JSONResponse({"job_id": job.id, "review_id": review_session.id})
+
+
+_FALLBACK_WRITER_THRESHOLD = 2  # consecutive gate failures before swap
+
+
+def _serialize_sections(sections: list[dict]) -> list[dict]:
+    """Strip in-memory-only fields (the ReviewerVerdict dataclass) so
+    the sections list is JSON-safe when emitted via SSE / metadata.
+    The verdict already shaped the orchestrator's decisions; the
+    client only needs role / model / text for rendering."""
+    return [{k: v for k, v in s.items() if k != "verdict"} for s in sections]
 
 
 def _start_review_thread(
@@ -659,6 +710,7 @@ def _start_review_thread(
     max_tokens: int | None,
     num_ctx: int | None,
     loop: asyncio.AbstractEventLoop,
+    fallback_writer_model: str | None = None,
 ) -> None:
     def _persist(status: str, sections: list[dict]) -> None:
         """Save the current sections list to disk under the review session
@@ -683,6 +735,12 @@ def _start_review_thread(
 
     def _runner() -> None:
         sections: list[dict] = []
+        # Mutable across rounds — the gate path may swap the active
+        # writer when the primary fails repeatedly. Captured by the
+        # closures below so they always pick up the current value.
+        active_writer = writer_model
+        consecutive_gate_fails = 0
+        fallback_engaged = False
 
         def run_section(*, role: str, model: str, messages: list[ChatMessage]) -> str:
             """Stream one role's response and capture its text. Returns the
@@ -749,6 +807,21 @@ def _start_review_thread(
                 msgs.append(ChatMessage(role="system", content=composed))
             return msgs
 
+        def _emit_inline_section(role: str, model: str, text: str) -> None:
+            """Render a non-LLM section (gates, fallback notice) in the
+            UI by emitting section_start + a token chunk and appending
+            to ``sections``. Mirrors the way live writer/reviewer
+            sections show up on screen."""
+            section_idx = len(sections)
+            job_manager.emit_event(
+                job.id,
+                "section_start",
+                {"index": section_idx, "role": role, "model": model},
+                loop,
+            )
+            job_manager.append_chunk(job.id, text, loop)
+            sections.append({"role": role, "model": model, "text": text})
+
         def gate_or_review(writer_text: str) -> None:
             """Run static-analysis gates on the writer's latest output.
             If any gate fails, append a `gates` section with the
@@ -756,33 +829,80 @@ def _start_review_thread(
             no point asking the domain reviewer to opine on code that
             doesn't even parse. If gates pass (or there are no code
             blocks to gate), call the reviewer as before.
+
+            Side effect: bumps `consecutive_gate_fails` on a fail and
+            resets it on a pass. The writer-rebuild step uses that
+            counter (plus the operator's fallback_writer_model) to
+            decide whether to swap writers for the next round.
             """
+            nonlocal consecutive_gate_fails
             blocks = extract_python_blocks(writer_text)
             code = "\n\n".join(blocks)
             results = run_gates(code) if code else []
             if results and not gates_all_passed(results):
+                consecutive_gate_fails += 1
                 feedback = gates_format_for_writer(results)
-                section_idx = len(sections)
-                # Emit section_start so the UI renders the gate panel
-                # in real time, mirroring how live writer/reviewer
-                # sections appear.
-                job_manager.emit_event(
-                    job.id,
-                    "section_start",
-                    {"index": section_idx, "role": "gates", "model": "(static analysis)"},
-                    loop,
-                )
-                job_manager.append_chunk(job.id, feedback, loop)
-                sections.append({"role": "gates", "model": "(static analysis)", "text": feedback})
+                _emit_inline_section("gates", "(static analysis)", feedback)
                 return
 
+            consecutive_gate_fails = 0
             review_user = (
-                f"{REVIEWER_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
+                f"{REVIEWER_INSTRUCTION}\n\n{REVIEWER_VERDICT_SCHEMA}\n\n"
+                f"---\n\nOriginal task:\n{prompt}\n\n"
                 f"---\n\nCode under review:\n\n{writer_text}"
             )
             msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
             text = run_section(role="reviewer", model=reviewer_model, messages=msgs)
-            sections.append({"role": "reviewer", "model": reviewer_model, "text": text})
+            verdict = parse_reviewer_verdict(text)
+            # Persist the cleaned prose (JSON block stripped) for the
+            # human-facing review log; the verdict object is kept on the
+            # in-memory section dict for the orchestrator to branch on.
+            sections.append({
+                "role": "reviewer",
+                "model": reviewer_model,
+                "text": verdict.display_text(),
+                "verdict": verdict,
+            })
+
+        def maybe_swap_writer(reason: str | None = None) -> None:
+            """If the operator configured a fallback writer, swap the
+            primary out. Idempotent — only fires once per review.
+
+            Trigger conditions:
+              * Default (reason=None): primary failed gates >= N times
+                consecutively (the static-analysis trigger).
+              * reason="reviewer_recommended": reviewer's verdict
+                returned next_action == "rebuild_different_writer",
+                meaning the writer keeps making the same domain /
+                hardware-grounding mistake. Bypasses the gate
+                threshold entirely.
+            """
+            nonlocal active_writer, fallback_engaged
+            if fallback_engaged:
+                return
+            if not fallback_writer_model:
+                return
+            if reason is None and consecutive_gate_fails < _FALLBACK_WRITER_THRESHOLD:
+                return
+            previous = active_writer
+            active_writer = fallback_writer_model
+            fallback_engaged = True
+            if reason == "reviewer_recommended":
+                why = (
+                    f"Reviewer recommended a different writer model — the "
+                    f"current primary keeps making the same domain-level "
+                    f"mistake. "
+                )
+            else:
+                why = (
+                    f"Primary writer `{previous}` failed static-analysis "
+                    f"gates {consecutive_gate_fails} times in a row. "
+                )
+            notice = (
+                f"{why}Switching to fallback writer "
+                f"`{fallback_writer_model}` for the next rebuild round."
+            )
+            _emit_inline_section("fallback", "(orchestrator)", notice)
 
         def revise_user_message(prev_writer_text: str, feedback_section: dict) -> str:
             """Build the writer's next prompt. Format depends on whether
@@ -808,8 +928,8 @@ def _start_review_thread(
         try:
             # Round 0 — writer produces initial code
             writer_msgs = base_messages() + [ChatMessage(role="user", content=prompt)]
-            writer_text = run_section(role="writer", model=writer_model, messages=writer_msgs)
-            sections.append({"role": "writer", "model": writer_model, "text": writer_text})
+            writer_text = run_section(role="writer", model=active_writer, messages=writer_msgs)
+            sections.append({"role": "writer", "model": active_writer, "text": writer_text})
 
             # Round 1 — gates → reviewer (or gate failure stops here)
             gate_or_review(writer_text)
@@ -817,6 +937,31 @@ def _start_review_thread(
             # Subsequent rounds alternate writer revision / (gates → reviewer)
             for i in range(2, rounds):
                 if i % 2 == 0:
+                    # Before the next rebuild, consult the latest
+                    # reviewer verdict (if any). The reviewer's JSON
+                    # `recommended_next_action` lets the orchestrator
+                    # short-circuit clearly-finished reviews and engage
+                    # the fallback for domain-level failures.
+                    last = sections[-1] if sections else None
+                    last_verdict: ReviewerVerdict | None = (
+                        last.get("verdict") if last and last["role"] == "reviewer" else None
+                    )
+                    if last_verdict and last_verdict.next_action == "approve":
+                        break  # reviewer says we're done
+                    if last_verdict and last_verdict.next_action == "abort":
+                        _emit_inline_section(
+                            "fallback", "(orchestrator)",
+                            "Reviewer indicated the task can't be completed as "
+                            "specified (`safe_to_rebuild=false` or "
+                            "`recommended_next_action=abort`). Stopping.",
+                        )
+                        break
+                    if last_verdict and last_verdict.next_action == "rebuild_different_writer":
+                        maybe_swap_writer(reason="reviewer_recommended")
+                    else:
+                        # Static-analysis trigger only — reviewer is
+                        # happy enough with the writer model.
+                        maybe_swap_writer()
                     # Writer revises based on whatever the previous slot
                     # was (reviewer notes OR gate failures).
                     prev_writer = next(
@@ -825,8 +970,8 @@ def _start_review_thread(
                     )
                     revise_user = revise_user_message(prev_writer["text"], sections[-1])
                     msgs = base_messages() + [ChatMessage(role="user", content=revise_user)]
-                    text = run_section(role="writer", model=writer_model, messages=msgs)
-                    sections.append({"role": "writer", "model": writer_model, "text": text})
+                    text = run_section(role="writer", model=active_writer, messages=msgs)
+                    sections.append({"role": "writer", "model": active_writer, "text": text})
                 else:
                     # Gates → reviewer for the latest writer output.
                     gate_or_review(sections[-1]["text"])
@@ -836,7 +981,7 @@ def _start_review_thread(
                 job.id,
                 "done",
                 loop,
-                metadata={"kind": "review", "sections": sections, "review_id": review_id},
+                metadata={"kind": "review", "sections": _serialize_sections(sections), "review_id": review_id},
             )
         except _StopRequested as stop:
             _persist("stopped", sections)
@@ -846,7 +991,7 @@ def _start_review_thread(
                 loop,
                 metadata={
                     "kind": "review",
-                    "sections": sections,
+                    "sections": _serialize_sections(sections),
                     "review_id": review_id,
                     "stopped_during": stop.model,
                 },
@@ -859,7 +1004,7 @@ def _start_review_thread(
                 "error",
                 loop,
                 error=str(exc),
-                metadata={"kind": "review", "sections": sections, "review_id": review_id},
+                metadata={"kind": "review", "sections": _serialize_sections(sections), "review_id": review_id},
             )
 
     threading.Thread(target=_runner, daemon=True, name=f"review-{job.id[:8]}").start()
@@ -889,6 +1034,29 @@ def _ollama_installed_models() -> list[str]:
     return names
 
 
+def _model_choices(*, include_auto: bool = True) -> list[str]:
+    """Dropdown options for any model selector in the UI. Order:
+    1. ``auto`` (preset router) — only when include_auto is True.
+    2. The three preset slots (granite / gemma / qwen) — always
+       present so existing flows / tests / smart-install presets
+       keep working even if Ollama hasn't been queried yet.
+    3. Every model name reported by Ollama, in install order.
+
+    Slot names are kept distinct from raw model names ("granite" vs
+    "granite4:latest") so the user can pick "granite" to follow the
+    smart-install slot OR pin to "granite4:latest" directly."""
+    choices: list[str] = []
+    if include_auto:
+        choices.append("auto")
+    for slot in ("granite", "gemma", "qwen"):
+        if slot not in choices:
+            choices.append(slot)
+    for name in _ollama_installed_models():
+        if name not in choices:
+            choices.append(name)
+    return choices
+
+
 # ---------------------------------------------------------------------------
 # Compare page (one prompt → multiple models, side-by-side)
 # ---------------------------------------------------------------------------
@@ -906,7 +1074,7 @@ def _start_compare_thread(
 
     def _runner() -> None:
         try:
-            adapter = chat_service.adapters[model_key]
+            adapter = chat_service.get_adapter(model_key)
             wall_started = _time.perf_counter()
             prompt_tokens: int | None = None
             completion_tokens: int | None = None
@@ -978,7 +1146,7 @@ async def compare_page(request: Request):
         request,
         "compare.html",
         {
-            "model_keys": list(chat_service.adapters.keys()),
+            "model_keys": _model_choices(include_auto=False),
             "summaries": _compare_summaries(),
             "tally": comparison_storage.winner_tally(),
             "loaded": None,
@@ -997,7 +1165,7 @@ async def compare_load_page(run_id: str, request: Request):
         request,
         "compare.html",
         {
-            "model_keys": list(chat_service.adapters.keys()),
+            "model_keys": _model_choices(include_auto=False),
             "summaries": _compare_summaries(),
             "tally": comparison_storage.winner_tally(),
             "loaded": dataclasses.asdict(loaded),
@@ -1025,7 +1193,11 @@ async def start_compare(request: Request) -> JSONResponse:
         raise HTTPException(400, "empty prompt")
     if not requested:
         raise HTTPException(400, "no models selected")
-    available = chat_service.adapters
+    # Validate against the union of preset slots + actually-installed
+    # Ollama models. ChatService.get_adapter builds adapters lazily,
+    # but we still want fast feedback on a typo (e.g. "qewn3-coder")
+    # rather than letting it fail mid-stream against Ollama's HTTP API.
+    available = set(_model_choices(include_auto=False))
     unknown = [m for m in requested if m not in available]
     if unknown:
         raise HTTPException(400, f"unknown model(s): {', '.join(unknown)}")

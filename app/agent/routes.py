@@ -71,12 +71,15 @@ def _find_active_agent_job() -> Optional[dict]:
 
 @router.get("/agent", response_class=HTMLResponse)
 async def agent_page(request: Request):
+    # Match the chat/review/compare dropdown behaviour: list every
+    # installed Ollama model, not just the three preset slots.
+    from app.web.app import _model_choices
     return agent_templates.TemplateResponse(
         request,
         "agent.html",
         {
             "settings": settings,
-            "model_options": ["granite", "gemma", "qwen"],
+            "model_options": _model_choices(include_auto=False),
             "missing_deps": _missing_agent_deps(),
             "active_job": _find_active_agent_job(),
         },
@@ -104,11 +107,15 @@ async def start_agent(request: Request) -> JSONResponse:
     if not prompt:
         raise HTTPException(400, "empty prompt")
 
+    # Accept either a preset slot name or a raw Ollama model name —
+    # ChatService.get_adapter handles both, so the agent dropdown can
+    # surface every installed model the same way chat/review/compare do.
+    from app.web.app import _model_choices
     model_key = body.get("model") or "granite"
-    if model_key not in chat_service.adapters:
+    if model_key not in set(_model_choices(include_auto=False)):
         raise HTTPException(400, f"unknown model: {model_key}")
 
-    adapter = chat_service.adapters[model_key]
+    adapter = chat_service.get_adapter(model_key)
     job = job_manager.create(
         chat_id=f"agent-{int(asyncio.get_running_loop().time())}",
         request_data={

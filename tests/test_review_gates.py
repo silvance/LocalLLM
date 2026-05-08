@@ -108,6 +108,32 @@ def test_gate_smoke_catches_import_time_error(monkeypatch: pytest.MonkeyPatch) -
     assert any("boom" in m or "RuntimeError" in m for m in r.messages)
 
 
+def test_gate_smoke_subprocess_env_is_scrubbed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The smoke subprocess must NOT inherit operator credentials —
+    OLLAMA_HOST, AWS keys, GitHub tokens, LOCALLLM_*. Defense in depth
+    against an LLM that sneaks `os.environ` exfiltration into a module-
+    level call."""
+    monkeypatch.setenv("LOCALLLM_REVIEW_GATE_SMOKE_ENABLED", "1")
+    monkeypatch.setenv("OLLAMA_HOST", "http://leak.example:9999")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "do-not-leak")
+    monkeypatch.setenv("GH_TOKEN", "ghp_dont_leak")
+    monkeypatch.setenv("LOCALLLM_DATA_DIR", "/tmp/sensitive")
+
+    # Have the subprocess dump the env vars it sees. If env scrub
+    # works, none of the secrets above will appear.
+    code = (
+        "import os, json, sys\n"
+        "sys.stderr.write(json.dumps(dict(os.environ)))\n"
+    )
+    r = gate_smoke(code, timeout=10.0)
+    assert r.passed is True or r.passed is False  # we just care about the env, not pass/fail
+    captured = " ".join(r.messages)
+    assert "leak.example" not in captured, "OLLAMA_HOST leaked into smoke subprocess"
+    assert "do-not-leak" not in captured, "AWS_SECRET_ACCESS_KEY leaked"
+    assert "ghp_dont_leak" not in captured, "GH_TOKEN leaked"
+    assert "/tmp/sensitive" not in captured, "LOCALLLM_DATA_DIR leaked"
+
+
 # ---------------------------------------------------------------------------
 # run_gates — short-circuit behaviour
 # ---------------------------------------------------------------------------

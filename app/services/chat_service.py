@@ -28,17 +28,33 @@ class ChatService:
         self.settings = get_settings()
         self.router = ModelRouter()
         self.rag = RAGService()
-        self.adapters: dict[ModelKey, OllamaAdapter] = {
+        # Three preset slots — what the auto-router chooses between and
+        # what smart-install configures. Other adapters get built lazily
+        # on first reference via get_adapter() so any installed Ollama
+        # model is selectable without declaring it as a slot in config.
+        self.adapters: dict[str, OllamaAdapter] = {
             "granite": OllamaAdapter("granite"),
             "gemma": OllamaAdapter("gemma"),
             "qwen": OllamaAdapter("qwen"),
         }
 
+    def get_adapter(self, name: str) -> OllamaAdapter:
+        """Resolve an adapter by slot name (granite/gemma/qwen) or raw
+        Ollama model name (qwen2.5-coder:32b, deepseek-coder-v2:latest,
+        ...). Caches subsequent lookups so the underlying ollama.Client
+        is reused per model."""
+        cached = self.adapters.get(name)
+        if cached is not None:
+            return cached
+        adapter = OllamaAdapter(name)
+        self.adapters[name] = adapter
+        return adapter
+
     def _resolve_model(
         self,
         request: ChatRequest,
         selection: ModelSelection,
-    ) -> tuple[ModelKey, RoutingDecision | None]:
+    ) -> tuple[str, RoutingDecision | None]:
         if selection == "auto":
             decision = self.router.route(request)
             return decision.selected_model, decision
@@ -85,7 +101,7 @@ class ChatService:
 
         model_key, decision = self._resolve_model(request, selection)
         return ChatExecution(
-            stream=self.adapters[model_key].stream_chat(request),
+            stream=self.get_adapter(model_key).stream_chat(request),
             selected_model=model_key,
             routing_decision=decision,
             retrievals=retrievals,

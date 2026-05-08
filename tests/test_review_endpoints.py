@@ -175,6 +175,179 @@ def test_review_skips_reviewer_when_gates_fail(
     assert "gemma" not in selections, f"reviewer should not have been called when gates failed; selections={selections}"
 
 
+def test_review_stops_early_when_reviewer_approves(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Reviewer's JSON verdict says `approve` → orchestrator should
+    break out of the loop instead of running another pointless
+    writer round."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    clean = "```python\ndef add(a, b):\n    return a + b\n```\n"
+    approve_review = (
+        "Looks good.\n\n```json\n"
+        '{"pass": true, "blockers": [], "safe_to_rebuild": true, '
+        '"recommended_next_action": "approve"}\n```\n'
+    )
+    # rounds=4 budget would normally be writer/reviewer/writer/reviewer.
+    # With early-break on approve we expect just writer/reviewer.
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[clean, approve_review])
+
+    r = client.post("/api/review", json={
+        "prompt": "implement add",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "rounds": 4,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+    roles = [s.role for s in saved.sections]
+    assert roles == ["writer", "reviewer"], f"expected early break, got {roles}"
+    # Only the writer + reviewer model calls should have happened
+    # (not a second writer rebuild).
+    selections = [c["selection"] for c in calls]
+    assert selections.count("qwen") == 1, f"writer ran more than once: {selections}"
+
+
+def test_review_engages_fallback_when_reviewer_recommends(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Reviewer's verdict has `recommended_next_action=rebuild_different_writer`
+    → fallback engages on the next round, even though gates passed
+    and the threshold isn't met."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    # Code that PASSES gates (clean python) but reviewer flags as a
+    # domain mistake.
+    code = (
+        "```python\n"
+        "import socket\n"
+        "def sniff_ble():\n"
+        "    s = socket.socket(socket.AF_INET, socket.SOCK_RAW)\n"
+        "    return s.recv(1024)\n"
+        "```\n"
+    )
+    domain_blocker = (
+        "BLE can't be sniffed via raw IPv4 sockets — needs HCI on Linux.\n\n"
+        "```json\n"
+        '{"pass": false, "blockers": ["wrong stack: BLE != AF_INET"], '
+        '"safe_to_rebuild": true, '
+        '"recommended_next_action": "rebuild_different_writer"}\n```\n'
+    )
+    fixed = "```python\nimport bluetooth\n\ndef sniff_ble():\n    pass\n```\n"
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[code, domain_blocker, fixed])
+
+    r = client.post("/api/review", json={
+        "prompt": "sniff BLE packets",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "fallback_writer_model": "granite",
+        "rounds": 4,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    roles = [s.role for s in saved.sections]
+    assert "fallback" in roles, f"fallback notice not emitted; roles={roles}"
+    # The writer call AFTER the fallback notice should target granite.
+    fallback_idx = next(i for i, c in enumerate(calls) if c["selection"] == "granite")
+    assert fallback_idx > 0, "granite writer never called — fallback didn't engage"
+
+
+def test_fallback_writer_engages_after_repeated_gate_failures(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Primary writer fails gate twice in a row → orchestrator emits a
+    `fallback` notice and uses the operator-specified fallback model
+    for the next rebuild round."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    broken = (
+        "Try this:\n\n"
+        "```python\n"
+        "def discover():\n"
+        "    return ghost  # undefined\n"
+        "```\n"
+    )
+    fixed = (
+        "OK now:\n\n"
+        "```python\n"
+        "def discover():\n"
+        "    return 1\n"
+        "```\n"
+    )
+    # 4 rounds budget: writer / gates / writer / gates / writer / gates ...
+    # Round 0 writer: broken
+    # Round 1 gates: fail (consecutive=1)
+    # Round 2 writer: broken again (consecutive_gate_fails still 1, no swap yet —
+    #                  threshold check happens AFTER the gate run, so we need
+    #                  another gate fail before the swap fires)
+    # Round 3 gates: fail (consecutive=2 → swap on next round)
+    # Round 4 writer: fallback active (returns clean code)
+    # Round 5 gates: pass → reviewer (we don't have rounds=6 budget though)
+    scripted = [broken, broken, fixed]
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=scripted)
+
+    r = client.post("/api/review", json={
+        "prompt": "build a discoverer",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "fallback_writer_model": "granite",
+        "rounds": 5,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    roles = [s.role for s in saved.sections]
+    # Must contain a fallback notice somewhere after at least 2 gate fails
+    assert "fallback" in roles, f"no fallback section emitted; roles={roles}"
+    fallback_idx = roles.index("fallback")
+    gates_before = [r for r in roles[:fallback_idx] if r == "gates"]
+    assert len(gates_before) >= 2, "fallback should fire only after ≥2 gate fails"
+
+    # Writer rounds AFTER the fallback notice must use the fallback model.
+    selections_after_fallback = [c["selection"] for c in calls[len([c for c in calls if c["selection"] == "qwen"]):]]  # noqa: E501
+    assert "granite" in [c["selection"] for c in calls], (
+        f"fallback model never invoked; selections={[c['selection'] for c in calls]}"
+    )
+
+
 def test_review_runs_reviewer_when_gates_pass(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:

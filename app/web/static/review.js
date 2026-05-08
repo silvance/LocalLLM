@@ -9,6 +9,7 @@
 
   const $writerModel = document.getElementById("writer-model");
   const $reviewerModel = document.getElementById("reviewer-model");
+  const $fallbackWriterModel = document.getElementById("fallback-writer-model");
   const $rounds = document.getElementById("rounds");
   const $systemPrompt = document.getElementById("system-prompt");
   const $temperature = document.getElementById("temperature");
@@ -390,6 +391,7 @@
         prompt,
         writer_model: $writerModel.value,
         reviewer_model: $reviewerModel.value,
+        fallback_writer_model: $fallbackWriterModel ? $fallbackWriterModel.value : "",
         rounds: parseInt($rounds.value, 10) || 3,
         system_prompt: $systemPrompt.value,
         temperature: parseFloat($temperature.value),
