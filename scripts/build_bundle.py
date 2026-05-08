@@ -398,7 +398,9 @@ def copy_templates(dst_root: Path) -> None:
         return
     for name in [
         "install.bat",
+        "install.py",
         "start.bat",
+        "start.py",
         "verify.ps1",
         "verify-installers.ps1",
         "INSTALL.md",

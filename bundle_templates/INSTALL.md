@@ -34,13 +34,17 @@ binary, where the embedded Ollama looks for them.
    powershell -ExecutionPolicy Bypass -File verify.ps1
    ```
    Mismatches = corrupted transfer or tampering. Re-transfer.
-3. Run `install.bat` once. It calls `LocalLLM.exe smart-install`, which
+3. Run the installer once. It calls `LocalLLM[.exe] smart-install`, which
    detects this machine's CPU/RAM/GPU and writes a sensible `DEFAULT_MODEL`
    into the user's `.env` so a slow box doesn't open with `qwen3-coder:30b`
    pre-selected. The bundle still ships ALL models — this only steers
-   the UI defaults. Re-run anytime via `LocalLLM.exe smart-install` if
-   hardware changes.
-4. **Double-click `LocalLLM.exe`** (or `start.bat`) to launch.
+   the UI defaults. Re-runnable.
+
+   - **Windows**: double-click `install.bat` (or `python install.py`).
+   - **Linux/macOS**: `python3 install.py` — no PowerShell needed.
+4. **Launch**:
+   - **Windows**: double-click `LocalLLM.exe` (or `start.bat`).
+   - **Linux/macOS**: `./LocalLLM` (or `python3 start.py`).
    - First launch unpacks the embedded payload to `%TEMP%\_MEIxxxxxx\`
      (~5–10 s on a cold disk). Subsequent launches reuse what's still
      in temp where possible.
