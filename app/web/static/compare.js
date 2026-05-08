@@ -131,17 +131,35 @@
     $afterActions.classList.remove("hidden");
   }
 
+  // Render columns + subscribe to each per-model job, shared by the
+  // fresh-run path (button click) and the resume path (page reload
+  // mid-run via window.LOCALLLM.activeRun).
+  function attachRun(runId, prompt, system_prompt, jobs) {
+    openSources.forEach((s) => s.close());
+    openSources = [];
+    clearColumns();
+    $afterActions && $afterActions.classList.add("hidden");
+    runState = {
+      runId,
+      prompt,
+      system_prompt,
+      pending: jobs.length,
+      results: {},
+    };
+    $status.textContent = `Running ${jobs.length} model${jobs.length === 1 ? "" : "s"}…`;
+    $runBtn.disabled = true;
+    for (const job of jobs) {
+      const col = renderColumn(job.model_key);
+      subscribe(job.model_key, job.job_id, col);
+    }
+  }
+
   $runBtn.addEventListener("click", async () => {
     const prompt = $promptInput.value.trim();
     const system_prompt = $systemPrompt.value;
     const models = selectedModels();
     if (!prompt || !models.length) return;
 
-    // Reset previous run.
-    openSources.forEach((s) => s.close());
-    openSources = [];
-    clearColumns();
-    $afterActions && $afterActions.classList.add("hidden");
     $status.textContent = "Starting run…";
     $runBtn.disabled = true;
 
@@ -164,19 +182,25 @@
       return;
     }
     const data = await res.json();
-    runState = {
-      runId: data.run_id,
-      prompt,
-      system_prompt,
-      pending: data.jobs.length,
-      results: {},
-    };
-    $status.textContent = `Running ${data.jobs.length} model${data.jobs.length === 1 ? "" : "s"}…`;
-    for (const job of data.jobs) {
-      const col = renderColumn(job.model_key);
-      subscribe(job.model_key, job.job_id, col);
-    }
+    attachRun(data.run_id, prompt, system_prompt, data.jobs);
   });
+
+  // Resume on reload: if the server passed an active run, re-attach
+  // SSE streams to the existing jobs and pre-populate the form so the
+  // page state matches what the user saw before navigating away.
+  const activeRun = window.LOCALLLM && window.LOCALLLM.activeRun;
+  if (activeRun) {
+    $promptInput.value = activeRun.prompt || "";
+    $systemPrompt.value = activeRun.system_prompt || "";
+    // Tick the model checkboxes the resumed jobs are running for, so
+    // the picker reflects what's actually streaming.
+    const activeKeys = new Set(activeRun.jobs.map((j) => j.model_key));
+    document.querySelectorAll(".model-checkbox").forEach((cb) => {
+      cb.checked = activeKeys.has(cb.value);
+    });
+    $status.textContent = "Resumed in-progress run.";
+    attachRun(activeRun.run_id, activeRun.prompt, activeRun.system_prompt, activeRun.jobs);
+  }
 
   $saveBtn.addEventListener("click", async () => {
     if (!runState) return;

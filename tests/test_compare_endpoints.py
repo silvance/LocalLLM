@@ -206,3 +206,41 @@ def test_delete_removes_run(client: TestClient) -> None:
     assert r.json() == {"ok": True}
 
     assert client.get(f"/compare/{payload['run_id']}").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Resume across navigation: in-flight runs surface on /compare reload
+# ---------------------------------------------------------------------------
+
+def test_compare_page_shows_active_run_after_navigation(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Mid-run navigation should leave the jobs running server-side; the
+    /compare page on return must surface them as `active_run` so the JS
+    can re-attach SSE streams instead of starting fresh."""
+    from app.web import app as web_app
+
+    # Replace the per-model thread with one that *doesn't* finish — so
+    # the jobs stay in `pending` status, simulating an in-flight run.
+    def _hang(job, request_obj, model_key, loop):
+        pass  # never finishes — leaves status="pending" forever
+    monkeypatch.setattr(web_app, "_start_compare_thread", _hang)
+
+    start = client.post("/api/compare", json={
+        "prompt": "compare resume probe",
+        "models": ["granite", "gemma"],
+    })
+    assert start.status_code == 200
+    started_run_id = start.json()["run_id"]
+
+    # Now hit /compare as if returning from another page. The HTML
+    # should embed an `activeRun` payload pointing at the same run.
+    page = client.get("/compare")
+    assert page.status_code == 200
+    body = page.text
+    assert started_run_id in body
+    assert "compare resume probe" in body
+    # JS hook expected by compare.js
+    assert "activeRun" in body
+    # Both model columns are referenced so resume UI knows what to render
+    assert "granite" in body and "gemma" in body

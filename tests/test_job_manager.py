@@ -49,6 +49,28 @@ def test_jobs_active_for_chat_filters_by_status() -> None:
     assert all(j.status in ("pending", "streaming") for j in active)
 
 
+def test_list_with_chat_prefix_returns_sorted() -> None:
+    """Compare/agent resume queries: find all jobs whose chat_id starts
+    with a known prefix, in start-order."""
+    mgr = JobManager()
+    a = mgr.create("compare:run-1", {"model_key": "granite"})
+    b = mgr.create("compare:run-1", {"model_key": "gemma"})
+    mgr.create("agent-9999", {})
+    mgr.create("chat-other", {})
+
+    out = mgr.list_with_chat_prefix("compare:")
+    assert [j.id for j in out] == [a.id, b.id]
+
+    agents = mgr.list_with_chat_prefix("agent-")
+    assert len(agents) == 1
+
+
+def test_list_with_chat_prefix_empty_when_no_match() -> None:
+    mgr = JobManager()
+    mgr.create("chat-A", {})
+    assert mgr.list_with_chat_prefix("compare:") == []
+
+
 def test_subscribe_unknown_job_returns_none_pair() -> None:
     mgr = JobManager()
     job, q = mgr.subscribe("nope")

@@ -208,4 +208,21 @@
       startAgent();
     }
   });
+
+  // Resume on reload: server passed an in-progress job, reattach the
+  // SSE stream + repopulate the prompt textarea so the page mirrors
+  // what was running before navigation.
+  const activeJob = window.LOCALLLM && window.LOCALLLM.activeJob;
+  if (activeJob && activeJob.job_id) {
+    $promptInput.value = activeJob.prompt || "";
+    if (activeJob.model) {
+      const modelSelect = document.getElementById("agent-model");
+      if (modelSelect && Array.from(modelSelect.options).some((o) => o.value === activeJob.model)) {
+        modelSelect.value = activeJob.model;
+      }
+    }
+    setStatus("resuming…", "");
+    $runBtn.disabled = true;
+    subscribe(activeJob.job_id);
+  }
 })();

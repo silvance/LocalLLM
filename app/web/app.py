@@ -24,7 +24,7 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -893,6 +893,7 @@ async def compare_page(request: Request):
             "summaries": _compare_summaries(),
             "tally": comparison_storage.winner_tally(),
             "loaded": None,
+            "active_run": _find_active_compare_run(),
             "agent_enabled": _agent_enabled,
         },
     )
@@ -952,12 +953,69 @@ async def start_compare(request: Request) -> JSONResponse:
     for model_key in requested:
         job = job_manager.create(
             chat_id=f"compare:{run_id}",
-            request_data={"selection": model_key, "model_key": model_key},
+            request_data={
+                "kind": "compare",
+                "run_id": run_id,
+                "selection": model_key,
+                "model_key": model_key,
+                # Stash prompt + system_prompt + the full requested-model
+                # list so /compare can rebuild the run state on reload
+                # without consulting any other store.
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "all_model_keys": list(requested),
+            },
         )
         _start_compare_thread(job, chat_request, model_key, loop)
         jobs.append({"model_key": model_key, "job_id": job.id})
 
     return JSONResponse({"run_id": run_id, "jobs": jobs})
+
+
+def _find_active_compare_run() -> Optional[dict]:
+    """Most-recent compare run with at least one job still streaming.
+
+    Returns the run's id, the original prompt/system, and the per-model
+    job list — enough for the /compare page to re-attach SSE streams
+    and re-populate the form on reload.
+    """
+    by_run: dict[str, list[Job]] = {}
+    for j in job_manager.list_with_chat_prefix("compare:"):
+        if j.request_data.get("kind") != "compare":
+            continue
+        rid = str(j.request_data.get("run_id") or "")
+        if not rid:
+            continue
+        by_run.setdefault(rid, []).append(j)
+    candidates = [
+        (rid, jobs) for rid, jobs in by_run.items()
+        if any(j.status in ("pending", "streaming") for j in jobs)
+    ]
+    if not candidates:
+        return None
+    # Most recent first job wins if there are multiple in-progress runs
+    # (rare — typically zero or one).
+    candidates.sort(key=lambda pair: max(j.started_at for j in pair[1]))
+    rid, jobs = candidates[-1]
+    sample = jobs[0].request_data
+    # Preserve the original column order so resumed columns match what
+    # the user saw before navigating away.
+    order: list[str] = list(sample.get("all_model_keys") or [])
+    jobs.sort(key=lambda j: order.index(j.request_data["model_key"])
+              if j.request_data["model_key"] in order else 0)
+    return {
+        "run_id": rid,
+        "prompt": str(sample.get("prompt") or ""),
+        "system_prompt": str(sample.get("system_prompt") or ""),
+        "jobs": [
+            {
+                "model_key": j.request_data["model_key"],
+                "job_id": j.id,
+                "status": j.status,
+            }
+            for j in jobs
+        ],
+    }
 
 
 @app.post("/api/compare/save")

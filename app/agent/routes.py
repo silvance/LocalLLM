@@ -7,6 +7,7 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -47,6 +48,25 @@ def _missing_agent_deps() -> list[str]:
     return missing
 
 
+def _find_active_agent_job() -> Optional[dict]:
+    """Most-recent agent job that's still running. Lets the /agent page
+    reattach its SSE stream when the user navigates away mid-loop and
+    comes back."""
+    from app.web.app import job_manager
+    candidates = [
+        j for j in job_manager.list_with_chat_prefix("agent-")
+        if j.status in ("pending", "streaming")
+    ]
+    if not candidates:
+        return None
+    job = max(candidates, key=lambda j: j.started_at)
+    return {
+        "job_id": job.id,
+        "model": str(job.request_data.get("model") or ""),
+        "prompt": str(job.request_data.get("prompt") or ""),
+    }
+
+
 @router.get("/agent", response_class=HTMLResponse)
 async def agent_page(request: Request):
     return agent_templates.TemplateResponse(
@@ -56,6 +76,7 @@ async def agent_page(request: Request):
             "settings": settings,
             "model_options": ["granite", "gemma", "qwen"],
             "missing_deps": _missing_agent_deps(),
+            "active_job": _find_active_agent_job(),
         },
     )
 
@@ -91,6 +112,7 @@ async def start_agent(request: Request) -> JSONResponse:
         request_data={
             "kind": "agent",
             "model": model_key,
+            "prompt": prompt,
             "prompt_chars": len(prompt),
         },
     )

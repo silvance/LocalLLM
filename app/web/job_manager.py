@@ -68,6 +68,16 @@ class JobManager:
     def jobs_active_for_chat(self, chat_id: str) -> list[Job]:
         return [j for j in self.list_for_chat(chat_id) if j.status in ("pending", "streaming")]
 
+    def list_with_chat_prefix(self, prefix: str) -> list[Job]:
+        """All jobs whose chat_id starts with ``prefix``, sorted by start
+        time. Used to find in-progress compare runs (chat_id = "compare:<id>")
+        and agent runs (chat_id = "agent-<ts>") on page reload, so the UI
+        can resume them across navigation."""
+        with self._lock:
+            jobs = [j for j in self._jobs.values() if j.chat_id.startswith(prefix)]
+        jobs.sort(key=lambda j: j.started_at)
+        return jobs
+
     # ------------------------------------------------------------------ stop signal
 
     def request_stop(self, job_id: str) -> bool:

@@ -134,6 +134,7 @@
   <script>
     window.LOCALLLM = {
       loadedId: {{ loaded.id|tojson if loaded else "null" }},
+      activeRun: {{ active_run|tojson if active_run else "null" }},
     };
   </script>
   <script src="/static/sidebar.js"></script>

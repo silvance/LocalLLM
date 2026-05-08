@@ -79,6 +79,11 @@
     <div id="agent-stream" class="agent-stream"></div>
   </main>
 
+  <script>
+    window.LOCALLLM = {
+      activeJob: {{ active_job|tojson if active_job else "null" }},
+    };
+  </script>
   <script src="/static/sidebar.js"></script>
   <script src="/agent-static/agent.js"></script>
 </body>
