@@ -85,3 +85,131 @@ def test_review_no_redirect_when_no_in_flight(client: TestClient) -> None:
     # active_job_id should be null in the embedded JS hook
     assert "activeJobId" in r.text
     assert "null" in r.text  # the tojson serialization of None
+
+
+# ---------------------------------------------------------------------------
+# Static-analysis gates fence the reviewer from broken code
+# ---------------------------------------------------------------------------
+
+def _stub_chat_service(monkeypatch: pytest.MonkeyPatch, scripted_outputs: list[str]) -> list[dict]:
+    """Replace chat_service.stream_chat with a deterministic generator.
+    Returns the call log so tests can assert what was sent to the model."""
+    from app.web import app as web_app
+
+    calls: list[dict] = []
+    pending = list(scripted_outputs)
+
+    class _FakeChunk:
+        def __init__(self, content: str) -> None:
+            self.content = content
+            self.done = False
+            self.prompt_tokens = None
+            self.completion_tokens = None
+            self.eval_duration_ns = None
+            self.total_duration_ns = None
+
+    def _fake_stream_chat(*, request, selection, use_rag=False, **_kw):
+        calls.append({"selection": selection, "messages": list(request.messages)})
+        text = pending.pop(0) if pending else ""
+
+        class _Execution:
+            stream = iter([_FakeChunk(text)])
+            selected_model = selection
+            routing_decision = None
+            retrievals: list = []
+
+        return _Execution()
+
+    monkeypatch.setattr(web_app.chat_service, "stream_chat", _fake_stream_chat)
+    return calls
+
+
+def test_review_skips_reviewer_when_gates_fail(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Writer produces code with an undefined name. Gates 1-2 should
+    catch it; the reviewer model should NEVER be called for round 1.
+    Instead a `gates` section is persisted with the lint findings."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    # Writer's only output: code that lints clean syntactically but
+    # references an undefined name. Reviewer should never be reached.
+    broken = (
+        "Here is your tool:\n\n"
+        "```python\n"
+        "def discover():\n"
+        "    return ghost_var  # undefined → pyflakes catches it\n"
+        "```\n"
+    )
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[broken])
+
+    r = client.post("/api/review", json={
+        "prompt": "build a discovery tool",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "rounds": 2,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    # Wait for the daemon thread to finish (rounds=2 means writer + 1
+    # follow-up — the follow-up should be a `gates` section, not reviewer).
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done", f"review never finished (status={saved and saved.status})"
+
+    roles = [s.role for s in saved.sections]
+    # Round 0: writer. Round 1: gates (NOT reviewer).
+    assert roles == ["writer", "gates"], f"unexpected role sequence: {roles}"
+    assert "ghost_var" in saved.sections[1].text, "gate feedback should mention the undefined name"
+    # Reviewer model selection should never have been invoked.
+    selections = [c["selection"] for c in calls]
+    assert "gemma" not in selections, f"reviewer should not have been called when gates failed; selections={selections}"
+
+
+def test_review_runs_reviewer_when_gates_pass(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Clean code → all gates pass → reviewer runs as before."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    clean = (
+        "Here you go:\n\n"
+        "```python\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "```\n"
+    )
+    review = "Looks fine. Maybe add type hints."
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[clean, review])
+
+    r = client.post("/api/review", json={
+        "prompt": "implement add()",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "rounds": 2,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+    assert [s.role for s in saved.sections] == ["writer", "reviewer"]
+    assert "gemma" in [c["selection"] for c in calls]

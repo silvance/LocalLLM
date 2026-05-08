@@ -95,6 +95,18 @@
 }
 .review-section.role-writer .role-label { color: var(--accent); }
 .review-section.role-reviewer .role-label { color: #d29922; }
+.review-section.role-gates .role-label { color: var(--warn); }
+.review-section.role-gates {
+  /* Static-analysis failure block — visually distinct from the
+     domain reviewer so the user can tell at a glance whether
+     the round was blocked by tooling or by the model. */
+  border-color: rgba(248, 81, 73, 0.4);
+  background: rgba(248, 81, 73, 0.04);
+}
+.review-section.role-gates .section-body {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
 
 .review-section .section-body {
   padding: 0.75rem 1rem;
