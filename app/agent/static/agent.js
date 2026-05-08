@@ -28,10 +28,12 @@
 
   function appendEvent(kind, headerLabel, bodyHtml, extra = {}) {
     const wasNearBottom = isScrolledNearBottom();
-    const ev = document.createElement("div");
+    const ev = document.createElement("details");
     ev.className = `agent-event kind-${kind}`;
+    // Default open; user can click the header (the <summary>) to fold.
+    ev.open = true;
     ev.innerHTML =
-      `<div class="event-header"><span>${escapeHtml(headerLabel)}</span>${extra.right || ""}</div>` +
+      `<summary class="event-header"><span>${escapeHtml(headerLabel)}</span>${extra.right || ""}</summary>` +
       `<div class="event-body">${bodyHtml}</div>`;
     $stream.appendChild(ev);
     if (wasNearBottom) scrollToBottom();

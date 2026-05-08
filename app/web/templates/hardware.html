@@ -6,6 +6,16 @@
   <link rel="stylesheet" href="/static/main.css">
 </head>
 <body>
+  <script>
+    try {
+      if (localStorage.getItem("localllm.sidebarCollapsed") === "1") {
+        document.body.classList.add("sidebar-collapsed");
+      }
+    } catch (_) {}
+  </script>
+  <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar">
+    <span class="icon-open">≡</span><span class="icon-close">»</span>
+  </button>
   <aside class="sidebar">
     <header>
       <h1>LocalLLM</h1>
@@ -128,5 +138,6 @@
     .model-row.missing .status-dot { color:var(--warn); }
     .model-row .status-label { color:var(--muted); font-size:0.8rem; }
   </style>
+  <script src="/static/sidebar.js"></script>
 </body>
 </html>

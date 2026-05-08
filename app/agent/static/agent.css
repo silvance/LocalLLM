@@ -61,8 +61,17 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
-  overflow: hidden;
+  /* No `overflow: hidden` — that would clip the inner scrollbar. The
+     border-radius on the header/body covers the rounding visually. */
 }
+/* Convert <details>'s built-in disclosure marker into a chevron we
+   can style consistently across browsers. */
+.agent-event > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.agent-event > summary::-webkit-details-marker { display: none; }
 .agent-event .event-header {
   display: flex;
   justify-content: space-between;
@@ -70,18 +79,48 @@
   padding: 0.4rem 0.85rem;
   background: rgba(255,255,255,0.03);
   border-bottom: 1px solid var(--border);
+  border-radius: 8px 8px 0 0;
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--muted);
   font-family: monospace;
 }
+.agent-event:not([open]) .event-header {
+  border-bottom: none;
+  border-radius: 8px;
+}
+.agent-event .event-header::before {
+  content: "▾";
+  display: inline-block;
+  margin-right: 0.5rem;
+  width: 0.7em;
+  text-align: center;
+  transition: transform 0.12s ease;
+  color: var(--muted);
+}
+.agent-event:not([open]) .event-header::before {
+  transform: rotate(-90deg);
+}
+.agent-event:hover .event-header { color: var(--text); }
 .agent-event .event-body {
   padding: 0.65rem 0.85rem;
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 0.95rem;
   line-height: 1.5;
+  /* Cap body height so a long REASONING / RESULT block doesn't push
+     subsequent events off-screen — operators can scroll within, or
+     fold the whole event by clicking the header. */
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.agent-event .event-body pre {
+  /* Inner pre (e.g. tool_call args, fetch result body) can grow
+     arbitrarily — let it scroll horizontally; vertical scroll is
+     handled by the parent .event-body. */
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .agent-event.kind-step .event-header { color: var(--accent); }

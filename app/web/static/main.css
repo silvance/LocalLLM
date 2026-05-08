@@ -25,7 +25,45 @@ body {
   grid-template-columns: 280px 1fr;
   height: 100vh;
   overflow: hidden;
+  /* Animate sidebar collapse — only the column-track widths change. */
+  transition: grid-template-columns 0.18s ease;
 }
+body.sidebar-collapsed {
+  grid-template-columns: 0 1fr;
+}
+body.sidebar-collapsed .sidebar {
+  /* Keep the element in the DOM (state, listeners) but visually
+     remove it so the main column expands cleanly. */
+  visibility: hidden;
+  border-right: none;
+}
+
+/* Sidebar collapse / expand toggle — a small floating button at the
+   top-left of the viewport. Always visible regardless of state so
+   the user can recover from `sidebar-collapsed` even on a small
+   screen where the sidebar would have eaten the corner. */
+.sidebar-toggle {
+  position: fixed;
+  top: 0.55rem;
+  left: 0.55rem;
+  z-index: 50;
+  padding: 0.25rem 0.55rem;
+  font-size: 1rem;
+  line-height: 1;
+  background: var(--panel);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.sidebar-toggle:hover {
+  color: var(--text);
+  background: #1f242c;
+}
+.sidebar-toggle .icon-open  { display: inline; }
+.sidebar-toggle .icon-close { display: none; }
+body.sidebar-collapsed .sidebar-toggle .icon-open  { display: none; }
+body.sidebar-collapsed .sidebar-toggle .icon-close { display: inline; }
 
 a {
   color: var(--accent);
@@ -168,24 +206,72 @@ button {
      min-height differently. */
   min-height: 0;
   overflow-y: auto;
-  padding: 1.5rem 2rem;
+  padding: 1.5rem 0;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
+  /* Center the conversation column on wide screens (Claude/ChatGPT
+     style) — assistant turns are full column width, but the column
+     itself caps at a comfortable reading measure. */
+  align-items: stretch;
 }
 .message {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  background: var(--panel);
-  max-width: 78ch;
+  width: 100%;
+  max-width: 80ch;
+  margin: 0 auto;
+  padding: 0 2rem;
+  /* The conversation column itself is centered; bubble vs full-width
+     decoration is per-role below. */
+  background: transparent;
+  border: none;
 }
 .message.user {
-  align-self: flex-end;
-  border-color: var(--user);
+  /* User: chat bubble on the right. The outer .message stays a
+     full-width grid row so alignment is by the inner wrapper. */
+  display: flex;
+  justify-content: flex-end;
 }
+.message.user .message-header,
+.message.user .content {
+  /* Wrap the user's content in an inline bubble. We do this with a
+     trick: turn the content + header into a flex column, but cap
+     its width and give IT the bubble background. */
+}
+.message.user > .message-header { display: none; }
+.message.user > .content {
+  background: var(--panel);
+  border: 1px solid var(--user);
+  border-radius: 18px 18px 4px 18px;
+  padding: 0.6rem 0.95rem;
+  max-width: min(48rem, 80%);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.message.user .copy-msg,
+.message.user .edit-msg {
+  /* Per-message buttons for user bubbles float to the left of the
+     bubble (since the bubble is right-aligned, hover-controls need
+     to live somewhere that doesn't fight the bubble's flow). We
+     attach them to a per-message floating action group below. */
+}
+
 .message.assistant {
-  align-self: flex-start;
+  display: block;
+}
+.message.assistant > .content {
+  /* Full-width prose, no bubble. Exactly what Claude/ChatGPT do. */
+  background: transparent;
+  border: none;
+  padding: 0;
+  line-height: 1.55;
+}
+.message.assistant > .message-header {
+  margin-bottom: 0.3rem;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+.message.assistant:hover > .message-header {
+  opacity: 1;
 }
 .message-header {
   display: flex;
@@ -200,6 +286,44 @@ button {
   color: var(--muted);
   letter-spacing: 0.05em;
 }
+/* Slash-command system bubble — local-only, never sent to the model
+   nor persisted to chat_storage. Distinct from real chat turns. */
+.message.system.local > .content {
+  background: rgba(46, 160, 67, 0.06);
+  border: 1px dashed rgba(46, 160, 67, 0.35);
+  border-radius: 6px;
+  padding: 0.55rem 0.85rem;
+}
+.message.system.local .role {
+  color: #56d364;
+}
+.message.system.local code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+}
+.message.system.local pre {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.slash-help {
+  border-collapse: collapse;
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+}
+.slash-help td {
+  padding: 0.15rem 0.6rem 0.15rem 0;
+  vertical-align: top;
+}
+.slash-help td:first-child {
+  white-space: nowrap;
+}
+
 .copy-msg, .edit-msg, .regen-msg {
   font-size: 0.75rem;
   padding: 0.15rem 0.4rem;
