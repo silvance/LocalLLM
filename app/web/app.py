@@ -74,6 +74,11 @@ from app.services.review_gates import (
     format_for_writer as gates_format_for_writer,
     run_gates,
 )
+from app.services.reviewer_verdict import (
+    SCHEMA_INSTRUCTION as REVIEWER_VERDICT_SCHEMA,
+    ReviewerVerdict,
+    parse as parse_reviewer_verdict,
+)
 from app.utils.code_linter import extract_python_blocks
 from app.utils.review_storage import (
     ReviewSection,
@@ -492,13 +497,46 @@ def _sse(event: str, data: dict) -> bytes:
 # ---------------------------------------------------------------------------
 
 REVIEWER_INSTRUCTION = (
-    "You are a senior code reviewer. Review the following code for problems "
-    "that would prevent it from running cleanly: missing imports, undefined "
-    "names, dataclass misuse, attribute references that don't exist on the "
-    "class, broken control flow, security footguns, and any other concrete "
-    "bugs. List issues briefly and specifically — line refs or quoted "
-    "snippets where helpful. Do not rewrite the code yourself; just call out "
-    "what's wrong."
+    "You are a senior code reviewer for security/forensics tooling. "
+    "Review the code under review for two classes of problem.\n\n"
+
+    "## Class 1: code-correctness bugs\n"
+    "Missing imports, undefined names, dataclass misuse, attribute "
+    "references that don't exist on the class, broken control flow, "
+    "wrong exception types, security footguns (subprocess shell=True, "
+    "yaml.load without SafeLoader, eval, pickle on untrusted input), "
+    "concurrency hazards, etc.\n\n"
+
+    "## Class 2: domain / hardware / protocol grounding\n"
+    "Verify the implementation is actually possible on the stated "
+    "hardware and OS — this is where local code-gen models hallucinate "
+    "the loudest. Specifically flag any of these:\n\n"
+    "- BLE / Bluetooth packets being sniffed, decoded, or transmitted "
+    "from a Wi-Fi interface (wlan0, mon0, wlp*, en*, anything in monitor "
+    "mode for 802.11). BLE goes through HCI / btmon / BlueZ on Linux, "
+    "Core Bluetooth on macOS, the Microsoft Bluetooth stack on Windows. "
+    "It cannot be sniffed from a Wi-Fi card.\n"
+    "- 802.11 monitor-mode operations (airodump-ng, scapy.sniff on a "
+    "wlan iface, deauth frames) being driven via Bluetooth / HCI APIs.\n"
+    "- SDR work (RTL-SDR, HackRF, BladeRF) being attempted via socket / "
+    "raw network APIs instead of the SDR's actual driver (pyrtlsdr, "
+    "soapy, GNU Radio, etc.).\n"
+    "- USB peripheral access via /dev/ttyUSB* or pyserial when the "
+    "device speaks HID, libusb, or a vendor protocol.\n"
+    "- Linux-only paths (/proc, /sys, iw, hcitool, ip-link) used "
+    "without a Windows or macOS branch when the original task didn't "
+    "pin an OS.\n"
+    "- Privilege assumptions (root, CAP_NET_RAW, CAP_NET_ADMIN) used "
+    "without acknowledging them.\n"
+    "- Network-namespace / monitor-mode / promiscuous-mode commands run "
+    "without a clear teardown so the user's interface stays in a "
+    "broken state.\n"
+    "- Protocols / standards confused with each other (Zigbee vs "
+    "Thread vs Z-Wave; LoRa vs LoRaWAN; UART vs SPI vs I²C).\n\n"
+
+    "List every issue briefly and specifically — line refs or quoted "
+    "snippets where helpful. Do not rewrite the code yourself; just "
+    "call out what's wrong."
 )
 REVISE_INSTRUCTION = (
     "You wrote the following code. A reviewer identified the issues below. "
@@ -651,6 +689,14 @@ async def start_review(request: Request) -> JSONResponse:
 _FALLBACK_WRITER_THRESHOLD = 2  # consecutive gate failures before swap
 
 
+def _serialize_sections(sections: list[dict]) -> list[dict]:
+    """Strip in-memory-only fields (the ReviewerVerdict dataclass) so
+    the sections list is JSON-safe when emitted via SSE / metadata.
+    The verdict already shaped the orchestrator's decisions; the
+    client only needs role / model / text for rendering."""
+    return [{k: v for k, v in s.items() if k != "verdict"} for s in sections]
+
+
 def _start_review_thread(
     *,
     job: Job,
@@ -801,34 +847,60 @@ def _start_review_thread(
 
             consecutive_gate_fails = 0
             review_user = (
-                f"{REVIEWER_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
+                f"{REVIEWER_INSTRUCTION}\n\n{REVIEWER_VERDICT_SCHEMA}\n\n"
+                f"---\n\nOriginal task:\n{prompt}\n\n"
                 f"---\n\nCode under review:\n\n{writer_text}"
             )
             msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
             text = run_section(role="reviewer", model=reviewer_model, messages=msgs)
-            sections.append({"role": "reviewer", "model": reviewer_model, "text": text})
+            verdict = parse_reviewer_verdict(text)
+            # Persist the cleaned prose (JSON block stripped) for the
+            # human-facing review log; the verdict object is kept on the
+            # in-memory section dict for the orchestrator to branch on.
+            sections.append({
+                "role": "reviewer",
+                "model": reviewer_model,
+                "text": verdict.display_text(),
+                "verdict": verdict,
+            })
 
-        def maybe_swap_writer() -> None:
-            """If the primary writer has failed gates ≥ N times in a
-            row AND the operator configured a fallback, swap to it for
-            the next round and emit a notice. Idempotent — only fires
-            once per review (after that the fallback IS the primary).
+        def maybe_swap_writer(reason: str | None = None) -> None:
+            """If the operator configured a fallback writer, swap the
+            primary out. Idempotent — only fires once per review.
+
+            Trigger conditions:
+              * Default (reason=None): primary failed gates >= N times
+                consecutively (the static-analysis trigger).
+              * reason="reviewer_recommended": reviewer's verdict
+                returned next_action == "rebuild_different_writer",
+                meaning the writer keeps making the same domain /
+                hardware-grounding mistake. Bypasses the gate
+                threshold entirely.
             """
             nonlocal active_writer, fallback_engaged
             if fallback_engaged:
                 return
             if not fallback_writer_model:
                 return
-            if consecutive_gate_fails < _FALLBACK_WRITER_THRESHOLD:
+            if reason is None and consecutive_gate_fails < _FALLBACK_WRITER_THRESHOLD:
                 return
             previous = active_writer
             active_writer = fallback_writer_model
             fallback_engaged = True
+            if reason == "reviewer_recommended":
+                why = (
+                    f"Reviewer recommended a different writer model — the "
+                    f"current primary keeps making the same domain-level "
+                    f"mistake. "
+                )
+            else:
+                why = (
+                    f"Primary writer `{previous}` failed static-analysis "
+                    f"gates {consecutive_gate_fails} times in a row. "
+                )
             notice = (
-                f"Primary writer `{previous}` failed static-analysis gates "
-                f"{consecutive_gate_fails} times in a row. Switching to "
-                f"fallback writer `{fallback_writer_model}` for the next "
-                f"rebuild round."
+                f"{why}Switching to fallback writer "
+                f"`{fallback_writer_model}` for the next rebuild round."
             )
             _emit_inline_section("fallback", "(orchestrator)", notice)
 
@@ -865,10 +937,31 @@ def _start_review_thread(
             # Subsequent rounds alternate writer revision / (gates → reviewer)
             for i in range(2, rounds):
                 if i % 2 == 0:
-                    # Before the next rebuild, see if the primary writer
-                    # is repeatedly producing un-gateable code and we
-                    # have a fallback to swap in.
-                    maybe_swap_writer()
+                    # Before the next rebuild, consult the latest
+                    # reviewer verdict (if any). The reviewer's JSON
+                    # `recommended_next_action` lets the orchestrator
+                    # short-circuit clearly-finished reviews and engage
+                    # the fallback for domain-level failures.
+                    last = sections[-1] if sections else None
+                    last_verdict: ReviewerVerdict | None = (
+                        last.get("verdict") if last and last["role"] == "reviewer" else None
+                    )
+                    if last_verdict and last_verdict.next_action == "approve":
+                        break  # reviewer says we're done
+                    if last_verdict and last_verdict.next_action == "abort":
+                        _emit_inline_section(
+                            "fallback", "(orchestrator)",
+                            "Reviewer indicated the task can't be completed as "
+                            "specified (`safe_to_rebuild=false` or "
+                            "`recommended_next_action=abort`). Stopping.",
+                        )
+                        break
+                    if last_verdict and last_verdict.next_action == "rebuild_different_writer":
+                        maybe_swap_writer(reason="reviewer_recommended")
+                    else:
+                        # Static-analysis trigger only — reviewer is
+                        # happy enough with the writer model.
+                        maybe_swap_writer()
                     # Writer revises based on whatever the previous slot
                     # was (reviewer notes OR gate failures).
                     prev_writer = next(
@@ -888,7 +981,7 @@ def _start_review_thread(
                 job.id,
                 "done",
                 loop,
-                metadata={"kind": "review", "sections": sections, "review_id": review_id},
+                metadata={"kind": "review", "sections": _serialize_sections(sections), "review_id": review_id},
             )
         except _StopRequested as stop:
             _persist("stopped", sections)
@@ -898,7 +991,7 @@ def _start_review_thread(
                 loop,
                 metadata={
                     "kind": "review",
-                    "sections": sections,
+                    "sections": _serialize_sections(sections),
                     "review_id": review_id,
                     "stopped_during": stop.model,
                 },
@@ -911,7 +1004,7 @@ def _start_review_thread(
                 "error",
                 loop,
                 error=str(exc),
-                metadata={"kind": "review", "sections": sections, "review_id": review_id},
+                metadata={"kind": "review", "sections": _serialize_sections(sections), "review_id": review_id},
             )
 
     threading.Thread(target=_runner, daemon=True, name=f"review-{job.id[:8]}").start()

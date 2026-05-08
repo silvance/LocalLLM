@@ -142,6 +142,30 @@ def _smoke_enabled() -> bool:
     )
 
 
+# Env vars the smoke subprocess is allowed to see. Allowlist (not
+# denylist) so a new credential variable in the parent shell can't
+# leak in just because we forgot to add it here. Includes only what's
+# actually needed for Python to start and import — everything else
+# (OLLAMA_HOST, AWS_*, GH_TOKEN, LOCALLLM_*, HTTP_PROXY, …) is dropped.
+_SMOKE_ENV_ALLOWLIST: frozenset[str] = frozenset({
+    "PATH",          # subprocess on Windows needs it; sys.executable is absolute on POSIX but several stdlib bits expect PATH
+    "HOME",          # POSIX libs sometimes blow up without it
+    "TMPDIR", "TEMP", "TMP",
+    "LANG", "LC_ALL", "LC_CTYPE",
+    "PYTHONIOENCODING",
+    "SYSTEMROOT", "WINDIR", "USERPROFILE",  # Windows: subprocess can fail to start without these
+    "COMSPEC",
+    "PATHEXT",
+})
+
+
+def _safe_env() -> dict[str, str]:
+    """Filtered process env for the smoke subprocess. Allowlist-based
+    so adding a new env var in the parent never silently leaks in."""
+    src = os.environ
+    return {k: src[k] for k in _SMOKE_ENV_ALLOWLIST if k in src}
+
+
 def gate_smoke(code: str, *, timeout: float = 5.0) -> GateResult:
     """Gate 4: ``import`` the code in a clean subprocess to surface
     runtime errors that static analysis can't (e.g. ``raise
@@ -163,6 +187,11 @@ def gate_smoke(code: str, *, timeout: float = 5.0) -> GateResult:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                # Scrubbed env — drops OLLAMA_HOST, AWS_*, GH_TOKEN,
+                # LOCALLLM_*, HTTP_PROXY, etc. so model-generated import-
+                # time code can't exfiltrate creds or call out to the
+                # operator's configured backends.
+                env=_safe_env(),
             )
         except subprocess.TimeoutExpired:
             return GateResult(
