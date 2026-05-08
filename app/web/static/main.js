@@ -406,6 +406,199 @@
   }
 
   // ============================================================
+  // Slash commands — Discord-style local UI controls
+  // ============================================================
+
+  // Each command runs in the browser only. None of them send the
+  // entered text to the model; they tweak UI state, trigger an
+  // existing action (regen/edit/copy), or navigate. Unknown `/foo`
+  // input falls through to the normal send path so the model still
+  // sees it (e.g. someone literally asking about a "/clear" syntax).
+  function lastMessageIndex(role) {
+    const all = Array.from($messages.querySelectorAll(".message"));
+    for (let i = all.length - 1; i >= 0; i--) {
+      if (!role || all[i].dataset.role === role) return i;
+    }
+    return -1;
+  }
+
+  function showSystemMessage(html) {
+    // Local, unpersisted "system" bubble — not part of the chat history.
+    const el = document.createElement("div");
+    el.className = "message system local";
+    el.dataset.role = "system";
+    el.innerHTML =
+      `<div class="message-header"><span class="role">system</span></div>` +
+      `<div class="content"></div>`;
+    el.querySelector(".content").innerHTML = html;
+    $messages.appendChild(el);
+    scrollToBottom();
+  }
+
+  function htmlEscape(s) {
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // Order matters in the help list — keep it alphabetical for readability.
+  const SLASH_COMMANDS = {
+    "help": {
+      args: "",
+      desc: "List slash commands",
+      run: () => {
+        const rows = Object.entries(SLASH_COMMANDS)
+          .map(([name, c]) => {
+            const usage = `/${name}${c.args ? " " + c.args : ""}`;
+            return `<tr><td><code>${htmlEscape(usage)}</code></td><td>${htmlEscape(c.desc)}</td></tr>`;
+          }).join("");
+        showSystemMessage(`<table class="slash-help"><tbody>${rows}</tbody></table>`);
+      },
+    },
+    "clear": {
+      args: "",
+      desc: "Start a fresh chat (current chat is preserved on disk)",
+      run: async () => {
+        // POST /chats creates and redirects; just submit the form that's
+        // already on the page so we follow the same redirect path.
+        const form = document.querySelector('form[action="/chats"]');
+        if (form) form.submit();
+      },
+    },
+    "new": {
+      args: "",
+      desc: "Alias for /clear",
+      run: () => SLASH_COMMANDS.clear.run(),
+    },
+    "model": {
+      args: "[auto|granite|gemma|qwen]",
+      desc: "Show or set the active model",
+      run: (arg) => {
+        if (!arg) {
+          showSystemMessage(`Current model: <code>${htmlEscape($modelSelection.value)}</code>`);
+          return;
+        }
+        const allowed = Array.from($modelSelection.options).map((o) => o.value);
+        if (!allowed.includes(arg)) {
+          showSystemMessage(`Unknown model <code>${htmlEscape(arg)}</code>. Options: ${allowed.map((m) => `<code>${m}</code>`).join(", ")}`);
+          return;
+        }
+        $modelSelection.value = arg;
+        showSystemMessage(`Model set to <code>${htmlEscape(arg)}</code>`);
+      },
+    },
+    "rag": {
+      args: "[on|off|toggle]",
+      desc: "Show or change the RAG retrieval toggle",
+      run: (arg) => {
+        const cur = $useRag.checked;
+        const next = !arg
+          ? null
+          : arg === "on"     ? true
+          : arg === "off"    ? false
+          : arg === "toggle" ? !cur
+          : null;
+        if (next === null && arg) {
+          showSystemMessage(`Usage: <code>/rag on|off|toggle</code>. Current: <code>${cur ? "on" : "off"}</code>`);
+          return;
+        }
+        if (next === null) {
+          showSystemMessage(`RAG is <code>${cur ? "on" : "off"}</code>`);
+          return;
+        }
+        $useRag.checked = next;
+        showSystemMessage(`RAG set to <code>${next ? "on" : "off"}</code>`);
+      },
+    },
+    "system": {
+      args: "[prompt text]",
+      desc: "Show or set the system prompt",
+      run: (arg) => {
+        if (!arg) {
+          const cur = ($systemPrompt.value || "").trim() || "(empty)";
+          showSystemMessage(`<details><summary>System prompt (${cur.length} chars)</summary><pre>${htmlEscape(cur)}</pre></details>`);
+          return;
+        }
+        $systemPrompt.value = arg;
+        showSystemMessage(`System prompt set (${arg.length} chars)`);
+      },
+    },
+    "regen": {
+      args: "",
+      desc: "Regenerate the last assistant response",
+      run: () => {
+        const idx = lastMessageIndex("assistant");
+        if (idx < 0) {
+          showSystemMessage("No assistant message to regenerate.");
+          return;
+        }
+        regenerateAt(idx);
+      },
+    },
+    "regenerate": {
+      args: "",
+      desc: "Alias for /regen",
+      run: () => SLASH_COMMANDS.regen.run(),
+    },
+    "edit": {
+      args: "<new content>",
+      desc: "Edit the last user message and re-run from there",
+      run: (arg) => {
+        if (!arg) {
+          showSystemMessage("Usage: <code>/edit your new message text</code>");
+          return;
+        }
+        const idx = lastMessageIndex("user");
+        if (idx < 0) {
+          showSystemMessage("No user message to edit.");
+          return;
+        }
+        // Reuse the same path as the inline ✎ button: open editor + submit.
+        const all = Array.from($messages.querySelectorAll(".message"));
+        const messageEl = all[idx];
+        startEditAt(idx, messageEl);
+        const textarea = messageEl.querySelector(".edit-input");
+        if (textarea) textarea.value = arg;
+        const form = messageEl.querySelector(".edit-form");
+        if (form) form.requestSubmit();
+      },
+    },
+    "copy": {
+      args: "",
+      desc: "Copy the last assistant response to the clipboard",
+      run: async () => {
+        const idx = lastMessageIndex("assistant");
+        if (idx < 0) {
+          showSystemMessage("No assistant message to copy.");
+          return;
+        }
+        const all = Array.from($messages.querySelectorAll(".message"));
+        const content = all[idx].querySelector(".content");
+        const raw = content.dataset.raw || content.textContent;
+        const ok = await copyToClipboard(raw);
+        showSystemMessage(ok ? "Copied to clipboard." : "Copy failed.");
+      },
+    },
+  };
+
+  // Returns true if `text` was a known slash command and was handled.
+  // Returns false for unknown `/foo` so it falls through to send.
+  async function tryHandleSlashCommand(text) {
+    if (!text.startsWith("/")) return false;
+    const space = text.indexOf(" ");
+    const name = (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
+    const arg = (space === -1 ? "" : text.slice(space + 1)).trim();
+    const cmd = SLASH_COMMANDS[name];
+    if (!cmd) return false;
+    try {
+      await cmd.run(arg);
+    } catch (err) {
+      showSystemMessage(`Command <code>/${htmlEscape(name)}</code> failed: ${htmlEscape(String(err))}`);
+    }
+    return true;
+  }
+
+  // ============================================================
   // Form submission
   // ============================================================
 
@@ -413,6 +606,11 @@
     e.preventDefault();
     const content = $input.value.trim();
     if (!content) return;
+
+    if (await tryHandleSlashCommand(content)) {
+      $input.value = "";
+      return;
+    }
 
     appendMessage("user", content);
     $input.value = "";

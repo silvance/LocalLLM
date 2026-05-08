@@ -200,6 +200,42 @@ button {
   color: var(--muted);
   letter-spacing: 0.05em;
 }
+/* Slash-command system bubble — local-only, never sent to the model
+   nor persisted to chat_storage. Distinct from real chat turns. */
+.message.system.local {
+  background: rgba(46, 160, 67, 0.06);
+  border: 1px dashed rgba(46, 160, 67, 0.35);
+}
+.message.system.local .role {
+  color: #56d364;
+}
+.message.system.local code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+}
+.message.system.local pre {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.slash-help {
+  border-collapse: collapse;
+  margin: 0.2rem 0 0;
+  font-size: 0.85rem;
+}
+.slash-help td {
+  padding: 0.15rem 0.6rem 0.15rem 0;
+  vertical-align: top;
+}
+.slash-help td:first-child {
+  white-space: nowrap;
+}
+
 .copy-msg, .edit-msg, .regen-msg {
   font-size: 0.75rem;
   padding: 0.15rem 0.4rem;
