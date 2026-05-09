@@ -77,26 +77,22 @@
           <ul class="model-list">
             {% for m in rec.models %}
               {% set s = rec.model_status[m] %}
-              <li class="model-row {{ s }}">
+              <li class="model-row {{ s }}" data-model="{{ m }}">
                 <span class="status-dot">{{ "✓" if s == "installed" else "✗" }}</span>
                 <code>{{ m }}</code>
                 <span class="status-label">{{ s }}</span>
+                {% if s == "missing" %}
+                  <button type="button" class="btn primary pull-model" data-model="{{ m }}">
+                    ⬇ Pull
+                  </button>
+                  <span class="pull-progress muted-note"></span>
+                {% endif %}
               </li>
             {% endfor %}
           </ul>
 
-          {% if rec.missing %}
-            <h3 style="margin:1rem 0 0.5rem;font-size:0.95rem;">Pull the missing ones</h3>
-            <div class="code-block">
-              <div class="code-header">
-                <span class="code-lang">SHELL</span>
-                <button type="button" class="btn ghost copy-code">📋 Copy</button>
-              </div>
-              <pre><code id="pull-cmds">{% for m in rec.missing %}ollama pull {{ m }}
-{% endfor %}</code></pre>
-            </div>
-          {% else %}
-            <p style="color:var(--assistant);">All recommended models are installed. ✓</p>
+          {% if not rec.missing %}
+            <p style="color:var(--assistant);margin-top:1rem;">All recommended models are installed. ✓</p>
           {% endif %}
         </div>
       </section>
@@ -104,22 +100,89 @@
   </main>
 
   <script>
-    // Just the copy-code handler — pulled from main.js so this page
-    // doesn't need the whole chat client.
-    document.querySelectorAll(".copy-code").forEach(btn => {
+    // Per-row Pull button. Posts to /api/ollama/pull, subscribes to
+    // the returned job_id's SSE stream, renders progress (pct +
+    // current layer status), and flips the row to "installed" on
+    // a clean done event.
+    function fmtBytes(n) {
+      if (!n || n < 1024) return `${n || 0}B`;
+      const u = ["B", "KB", "MB", "GB", "TB"];
+      let i = 0;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return `${n.toFixed(1)}${u[i]}`;
+    }
+
+    function attachPull(btn, jobId) {
+      const row = btn.closest(".model-row");
+      const progress = row.querySelector(".pull-progress");
+      btn.disabled = true;
+      btn.textContent = "Pulling…";
+      const src = new EventSource(`/api/jobs/${jobId}/stream`);
+
+      src.addEventListener("pull_event", (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (d.error) {
+            progress.textContent = `❌ ${d.error}`;
+            return;
+          }
+          const status = d.status || "";
+          if (typeof d.total === "number" && d.total > 0) {
+            const pct = ((d.completed || 0) / d.total) * 100;
+            progress.textContent = `${status} — ${pct.toFixed(0)}% (${fmtBytes(d.completed || 0)} / ${fmtBytes(d.total)})`;
+          } else {
+            progress.textContent = status;
+          }
+        } catch (_) {}
+      });
+
+      src.addEventListener("done", (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          src.close();
+          if (d.status === "done") {
+            row.classList.remove("missing");
+            row.classList.add("installed");
+            row.querySelector(".status-dot").textContent = "✓";
+            row.querySelector(".status-label").textContent = "installed";
+            btn.remove();
+            progress.textContent = "✓ Pulled";
+            progress.style.color = "var(--assistant)";
+          } else {
+            btn.disabled = false;
+            btn.textContent = "⬇ Pull (retry)";
+            progress.textContent = `${d.status}: ${d.error || "unknown error"}`;
+          }
+        } catch (_) {}
+      });
+
+      src.onerror = () => {
+        // Browsers retry by default; if the job actually failed we'll
+        // see the `done` event — leave reconnect handling to the SSE.
+      };
+    }
+
+    document.querySelectorAll(".pull-model").forEach((btn) => {
       btn.addEventListener("click", async () => {
-        const code = btn.closest(".code-block").querySelector("pre code").textContent;
-        try { await navigator.clipboard.writeText(code); }
-        catch (_) {
-          const ta = document.createElement("textarea");
-          ta.value = code; ta.style.position = "fixed"; ta.style.opacity = "0";
-          document.body.appendChild(ta); ta.select();
-          try { document.execCommand("copy"); } catch (_) {}
-          document.body.removeChild(ta);
+        const model = btn.dataset.model;
+        try {
+          const r = await fetch("/api/ollama/pull", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model }),
+          });
+          if (!r.ok) {
+            const t = await r.text();
+            btn.closest(".model-row").querySelector(".pull-progress").textContent =
+              `❌ ${r.status}: ${t}`;
+            return;
+          }
+          const data = await r.json();
+          attachPull(btn, data.job_id);
+        } catch (err) {
+          btn.closest(".model-row").querySelector(".pull-progress").textContent =
+            `❌ ${err}`;
         }
-        const orig = btn.textContent;
-        btn.textContent = "✓ Copied"; btn.classList.add("copied");
-        setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1200);
       });
     });
   </script>
@@ -132,11 +195,14 @@
     .hw-table td { padding:0.4rem 0; }
     .model-list { list-style:none; padding:0; margin:0; }
     .model-row { display:flex; align-items:center; gap:0.6rem;
-                 padding:0.3rem 0; font-size:0.95rem; }
+                 padding:0.3rem 0; font-size:0.95rem; flex-wrap:wrap; }
     .model-row .status-dot { display:inline-block; width:1rem; text-align:center; }
     .model-row.installed .status-dot { color:var(--assistant); }
     .model-row.missing .status-dot { color:var(--warn); }
     .model-row .status-label { color:var(--muted); font-size:0.8rem; }
+    .model-row .pull-model { padding:0.2rem 0.55rem; font-size:0.8rem; }
+    .model-row .pull-progress { color:var(--muted); font-size:0.8rem;
+                                font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   </style>
   <script src="/static/sidebar.js"></script>
 </body>

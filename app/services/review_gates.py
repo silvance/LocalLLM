@@ -54,6 +54,56 @@ class GateResult:
 # --- Gates ----------------------------------------------------------------
 
 
+def gate_candidate_count(text: str) -> GateResult:
+    """Gate 0: the writer's response must contain exactly one explicit
+    fenced ```python``` block.
+
+    - 0 blocks → fail with a message that's specifically about the
+      fence syntax, not the code itself ("did you forget the
+      ```python tag?"). Helps the writer recover faster than a
+      generic syntax-error spew.
+    - >1 blocks → fail with "multiple_candidates". The writer often
+      gives "here's option A, here's option B" or includes example
+      blocks alongside the answer; downstream gates will get
+      confused trying to lint a concatenation of two unrelated
+      programs.
+    - 1 block → pass. Subsequent gates see only the canonical
+      candidate.
+
+    Operates on the FULL writer response, not on extracted code, so
+    the message can talk about fence syntax. Subsequent gates run on
+    the extracted code via the standard run_gates pipeline.
+    """
+    from app.utils.code_linter import extract_python_blocks
+    blocks = extract_python_blocks(text or "")
+    n = len(blocks)
+    if n == 1:
+        return GateResult("candidate_count", passed=True)
+    if n == 0:
+        return GateResult(
+            "candidate_count",
+            passed=False,
+            messages=[
+                "no_candidate: no explicit ```python``` fenced code block "
+                "found in the response. Resubmit exactly one block "
+                "beginning with ```python (lowercase, no language tag is "
+                "rejected because untagged blocks were grabbing bash setup "
+                "snippets and false-flagging them as Python).",
+            ],
+        )
+    return GateResult(
+        "candidate_count",
+        passed=False,
+        messages=[
+            f"multiple_candidates: response contains {n} python code "
+            f"blocks. Return exactly one complete program. Do not "
+            f"include alternative versions, examples, setup commands, "
+            f"or 'here's option A / option B' framing. Pick the version "
+            f"you actually intend the user to run.",
+        ],
+    )
+
+
 def gate_syntax(code: str) -> GateResult:
     """Gate 1: code must parse as Python. Caps cascading downstream
     noise — there's no point running pyflakes if the file isn't even

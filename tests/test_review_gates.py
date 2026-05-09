@@ -9,12 +9,59 @@ from app.services.review_gates import (
     GateResult,
     all_passed,
     format_for_writer,
+    gate_candidate_count,
     gate_imports,
     gate_lint,
     gate_smoke,
     gate_syntax,
     run_gates,
 )
+
+
+# ---------------------------------------------------------------------------
+# gate_candidate_count (Gate 0)
+# ---------------------------------------------------------------------------
+
+def test_candidate_count_passes_on_single_python_block() -> None:
+    text = (
+        "Here you go:\n\n"
+        "```python\n"
+        "def add(a, b):\n    return a + b\n"
+        "```\n"
+    )
+    r = gate_candidate_count(text)
+    assert r.passed is True
+
+
+def test_candidate_count_fails_when_no_python_block() -> None:
+    text = (
+        "I think the answer is to use scapy. Run:\n\n"
+        "```bash\n"
+        "pip install scapy\n"
+        "```\n"
+    )
+    r = gate_candidate_count(text)
+    assert r.passed is False
+    assert "no_candidate" in r.messages[0]
+    # Message must talk about fence syntax, not 'syntax error'.
+    assert "```python" in r.messages[0]
+
+
+def test_candidate_count_fails_on_multiple_python_blocks() -> None:
+    text = (
+        "Option A:\n```python\ndef a(): pass\n```\n\n"
+        "Option B:\n```python\ndef b(): pass\n```\n"
+    )
+    r = gate_candidate_count(text)
+    assert r.passed is False
+    assert "multiple_candidates" in r.messages[0]
+    assert "2 python code blocks" in r.messages[0]
+
+
+def test_candidate_count_handles_empty_input() -> None:
+    r = gate_candidate_count("")
+    assert r.passed is False
+    assert "no_candidate" in r.messages[0]
 
 
 # ---------------------------------------------------------------------------

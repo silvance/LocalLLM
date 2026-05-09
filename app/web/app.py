@@ -72,6 +72,7 @@ from app.utils.comparison_storage import (
 from app.services.review_gates import (
     all_passed as gates_all_passed,
     format_for_writer as gates_format_for_writer,
+    gate_candidate_count,
     run_gates,
 )
 from app.services.reviewer_verdict import (
@@ -881,6 +882,21 @@ def _start_review_thread(
             the loop if any text repeats >= MAX_SAME_BLOCKER_REPEATS.
             """
             nonlocal abort_reason
+            # Gate 0: candidate_count runs on the FULL writer response
+            # so its failure message can talk about fence syntax. If
+            # the writer emitted zero or multiple python blocks, the
+            # downstream gates would either run on empty code (giving
+            # vacuous "OK"s) or on a concatenation of unrelated
+            # programs (giving spurious failures), neither of which
+            # gives the writer useful feedback.
+            cc = gate_candidate_count(writer_text)
+            if not cc.passed:
+                writer_static_fails[active_writer] = writer_static_fails.get(active_writer, 0) + 1
+                feedback = gates_format_for_writer([cc])
+                gate_failure_history.append(feedback)
+                _emit_inline_section("gates", "(static analysis)", feedback)
+                return
+
             blocks = extract_python_blocks(writer_text)
             code = "\n\n".join(blocks)
             results = run_gates(code) if code else []
@@ -1483,3 +1499,87 @@ async def hardware_api() -> JSONResponse:
     hw = detect_hardware()
     rec = recommend_models(hw)
     return JSONResponse(hw_to_dict(hw, rec, installed=_ollama_installed_models()))
+
+
+# ---------------------------------------------------------------------------
+# Ollama model management — Pull missing models from the /hardware page
+# ---------------------------------------------------------------------------
+
+def _start_pull_thread(job: Job, model: str, loop: asyncio.AbstractEventLoop) -> None:
+    """Run an Ollama `/api/pull` stream in a background thread, pumping
+    each NDJSON progress event into the JobManager so SSE subscribers
+    see it. Reuses the standard /api/jobs/{id}/stream path the chat /
+    review pages already use — no separate streaming route needed."""
+    from app.services.ollama_models import pull_model
+
+    settings = chat_service.settings
+    base_url = settings.ollama_host or "http://127.0.0.1:11434"
+
+    def _runner() -> None:
+        try:
+            terminal_status = "done"
+            error_text: str | None = None
+            for event in pull_model(model, base_url=base_url):
+                if job_manager.is_stop_requested(job.id):
+                    terminal_status = "stopped"
+                    break
+                if "error" in event:
+                    terminal_status = "error"
+                    error_text = str(event["error"])
+                    job_manager.emit_event(job.id, "pull_event", event, loop)
+                    break
+                # Pumping as a structural event (not a token) so the
+                # frontend can render a progress bar from the
+                # `total` / `completed` fields without parsing prose.
+                job_manager.emit_event(job.id, "pull_event", event, loop)
+            job_manager.finish(
+                job.id,
+                terminal_status,
+                loop,
+                error=error_text,
+                metadata={"kind": "ollama_pull", "model": model},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ollama pull failed for %s", model)
+            job_manager.finish(
+                job.id,
+                "error",
+                loop,
+                error=str(exc),
+                metadata={"kind": "ollama_pull", "model": model},
+            )
+
+    threading.Thread(
+        target=_runner, daemon=True, name=f"pull-{model[:24]}",
+    ).start()
+
+
+@app.post("/api/ollama/pull")
+async def start_ollama_pull(request: Request) -> JSONResponse:
+    """Kick off an Ollama model pull as a JobManager job. Returns the
+    job_id so the client can subscribe to /api/jobs/{job_id}/stream
+    and receive `pull_event` SSE messages with progress."""
+    from app.services.ollama_models import validate_model_name
+
+    body = await request.json()
+    raw = body.get("model") or ""
+    try:
+        model = validate_model_name(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    # Refuse duplicate pulls — if a pull for this exact model is
+    # already running we just return the existing job_id so the UI
+    # reattaches its progress stream instead of doubling traffic.
+    existing = job_manager.list_with_chat_prefix(f"pull:{model}")
+    for j in existing:
+        if j.status in ("pending", "streaming"):
+            return JSONResponse({"job_id": j.id, "model": model, "resumed": True})
+
+    job = job_manager.create(
+        chat_id=f"pull:{model}",
+        request_data={"kind": "ollama_pull", "model": model},
+    )
+    loop = asyncio.get_running_loop()
+    _start_pull_thread(job, model, loop)
+    return JSONResponse({"job_id": job.id, "model": model, "resumed": False})
