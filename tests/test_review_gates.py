@@ -65,6 +65,81 @@ def test_candidate_count_handles_empty_input() -> None:
 
 
 # ---------------------------------------------------------------------------
+# gate_no_placeholder_impl
+# ---------------------------------------------------------------------------
+
+def test_placeholder_gate_passes_on_real_code() -> None:
+    code = (
+        "import os\n"
+        "def cwd():\n"
+        "    return os.getcwd()\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is True
+
+
+def test_placeholder_gate_flags_fake_print() -> None:
+    """The exact failure mode ChatGPT highlighted — a `print` of a
+    string that announces it's simulated."""
+    code = (
+        "def sniff_ble():\n"
+        "    print('simulated BLE packet: 0x42')\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is False
+    assert any("string literal" in m.lower() or "fake" in m.lower() for m in r.messages)
+
+
+def test_placeholder_gate_flags_todo_implement_comment() -> None:
+    code = (
+        "def fetch_data():\n"
+        "    # TODO: implement actual fetch\n"
+        "    return None\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is False
+
+
+def test_placeholder_gate_flags_simulated_variable_name() -> None:
+    code = (
+        "def scan():\n"
+        "    simulated_packet = {'rssi': -50}\n"
+        "    return simulated_packet\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is False
+    assert any("identifier" in m.lower() for m in r.messages)
+
+
+def test_placeholder_gate_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operator escape hatch — set the env var when reviewing test
+    scaffolding (`mock_*` / `fake_*` are legitimate there)."""
+    monkeypatch.setenv("LOCALLLM_REVIEW_GATE_PLACEHOLDER_DISABLED", "1")
+    code = "def x():\n    print('simulated thing')\n"
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is True
+    assert "disabled" in r.messages[0].lower()
+
+
+def test_placeholder_gate_in_default_chain() -> None:
+    """Regression: gate_no_placeholder_impl must be in DEFAULT_GATES so
+    it actually runs without the orchestrator opting in. Sits BEFORE
+    gate_smoke because static checks are cheaper than subprocess runs."""
+    from app.services.review_gates import (
+        DEFAULT_GATES,
+        gate_no_placeholder_impl,
+        gate_smoke,
+    )
+    assert gate_no_placeholder_impl in DEFAULT_GATES
+    assert DEFAULT_GATES.index(gate_no_placeholder_impl) < DEFAULT_GATES.index(gate_smoke)
+
+
+# ---------------------------------------------------------------------------
 # gate_syntax
 # ---------------------------------------------------------------------------
 

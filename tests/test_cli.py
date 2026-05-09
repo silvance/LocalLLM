@@ -27,6 +27,7 @@ EXPECTED_SUBCOMMANDS = {
     "build-bundle",
     "build-index",
     "fetch-corpus",
+    "model-stats",
     "version",
     "doctor",
 }
@@ -78,6 +79,7 @@ def test_top_level_flag_routes_to_serve() -> None:
     ("build-bundle",     "scripts.build_bundle"),
     ("build-index",      "scripts.build_index"),
     ("fetch-corpus",     "scripts.fetch_corpus"),
+    ("model-stats",      "scripts.model_stats"),
 ])
 def test_subcommand_proxies_to_correct_module(
     monkeypatch: pytest.MonkeyPatch, subcmd: str, module_name: str

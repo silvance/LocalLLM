@@ -75,6 +75,7 @@ from app.services.review_gates import (
     gate_candidate_count,
     run_gates,
 )
+from app.utils.outcomes_log import OutcomeLog, default_log_path, hash_prompt
 from app.services.reviewer_verdict import (
     SCHEMA_INSTRUCTION as REVIEWER_VERDICT_SCHEMA,
     ReviewerVerdict,
@@ -111,6 +112,7 @@ chat_storage = ChatStorage(_CHATS_DIR)
 review_storage = ReviewStorage(_REVIEWS_DIR)
 comparison_storage = ComparisonStorage(_COMPARISONS_DIR)
 job_manager = JobManager()
+outcomes_log = OutcomeLog(default_log_path())
 
 
 app = FastAPI(title="LocalLLM")
@@ -508,6 +510,28 @@ REVIEWER_INSTRUCTION = (
     "yaml.load without SafeLoader, eval, pickle on untrusted input), "
     "concurrency hazards, etc.\n\n"
 
+    "## Class 3: real vs simulated implementation\n"
+    "Models will sometimes return code that LOOKS finished but doesn't "
+    "actually do the thing. Flag any of these:\n\n"
+    "- Comments like `# simulated`, `# placeholder`, `# for "
+    "demonstration`, `# would do X in production`, `# TODO: actually "
+    "implement` next to code that pretends to be the real thing.\n"
+    "- Variable / function names like `simulated_packet`, "
+    "`fake_device`, `mock_response`, `dummy_data` in code that's "
+    "supposed to be production logic (not a test fixture).\n"
+    "- String literals like `print(\"simulated BLE packet: 0x42\")` — "
+    "the model is announcing that the output is fabricated.\n"
+    "- Function bodies that are just `time.sleep(...)` + a `print` "
+    "loop when the function name implies actual I/O (`sniff_*`, "
+    "`fetch_*`, `scan_*`, `parse_*`).\n"
+    "- Hardcoded \"realistic-looking\" return values: "
+    "`return [{\"name\": \"AC:DE:48:00:11:22\", \"rssi\": -50}]` "
+    "from a function that should be doing live discovery.\n\n"
+    "If you see this, the right verdict is `pass: false`, "
+    "`recommended_next_action: \"rebuild_different_writer\"` — the "
+    "writer is taking a shortcut and a different model is more likely "
+    "to attempt the real implementation.\n\n"
+
     "## Class 2: domain / hardware / protocol grounding\n"
     "Verify the implementation is actually possible on the stated "
     "hardware and OS — this is where local code-gen models hallucinate "
@@ -882,6 +906,7 @@ def _start_review_thread(
             the loop if any text repeats >= MAX_SAME_BLOCKER_REPEATS.
             """
             nonlocal abort_reason
+            prompt_h = hash_prompt(prompt)
             # Gate 0: candidate_count runs on the FULL writer response
             # so its failure message can talk about fence syntax. If
             # the writer emitted zero or multiple python blocks, the
@@ -895,6 +920,10 @@ def _start_review_thread(
                 feedback = gates_format_for_writer([cc])
                 gate_failure_history.append(feedback)
                 _emit_inline_section("gates", "(static analysis)", feedback)
+                outcomes_log.append(
+                    review_id=review_id, writer=active_writer,
+                    event="gate_fail", gate=cc.name, prompt_hash=prompt_h,
+                )
                 return
 
             blocks = extract_python_blocks(writer_text)
@@ -905,7 +934,21 @@ def _start_review_thread(
                 feedback = gates_format_for_writer(results)
                 gate_failure_history.append(feedback)
                 _emit_inline_section("gates", "(static analysis)", feedback)
+                first_fail = next((r for r in results if not r.passed), None)
+                outcomes_log.append(
+                    review_id=review_id, writer=active_writer,
+                    event="gate_fail",
+                    gate=first_fail.name if first_fail else "unknown",
+                    prompt_hash=prompt_h,
+                )
                 return
+
+            # All gates passed — log it before invoking the reviewer
+            # so the model-stats CLI can compute a clean pass rate.
+            outcomes_log.append(
+                review_id=review_id, writer=active_writer,
+                event="gate_pass", prompt_hash=prompt_h,
+            )
 
             review_user = (
                 f"{REVIEWER_INSTRUCTION}\n\n{REVIEWER_VERDICT_SCHEMA}\n\n"
@@ -945,6 +988,15 @@ def _start_review_thread(
                 "text": verdict.display_text(),
                 "verdict": verdict,
             })
+            # Outcome log: writer attribution is the active_writer
+            # (the model whose code the reviewer just looked at), not
+            # the reviewer model.
+            outcomes_log.append(
+                review_id=review_id, writer=active_writer,
+                event="review_block" if verdict.blockers else "review_pass",
+                blocker_count=len(verdict.blockers) or None,
+                prompt_hash=prompt_h,
+            )
 
         def maybe_swap_writer(reason: str | None = None) -> None:
             """Pop the next builder off `fallback_chain` and engage it.
@@ -1082,6 +1134,11 @@ def _start_review_thread(
                         f"Stopping: {abort_reason}. The loop isn't "
                         f"making progress — abort is cheaper than "
                         f"more rounds.",
+                    )
+                    outcomes_log.append(
+                        review_id=review_id, writer=active_writer,
+                        event="abort", prompt_hash=hash_prompt(prompt),
+                        detail=abort_reason,
                     )
                     break
                 if i % 2 == 0:

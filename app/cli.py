@@ -231,6 +231,7 @@ COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "build-bundle":     _proxy("scripts.build_bundle"),
     "build-index":      _proxy("scripts.build_index"),
     "fetch-corpus":     _proxy("scripts.fetch_corpus"),
+    "model-stats":      _proxy("scripts.model_stats"),
     "version":          cmd_version,
     "doctor":           cmd_doctor,
 }
