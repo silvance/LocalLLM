@@ -545,3 +545,38 @@ button {
 .composer button {
   align-self: flex-end;
 }
+
+.ollama-banner {
+  margin: 0 0 1rem 0;
+  padding: 0.8rem 1rem;
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid var(--warn, #f85149);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+.ollama-banner code {
+  padding: 0.05rem 0.3rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 3px;
+  font-size: 0.85em;
+}
+.ollama-banner-error {
+  margin-top: 0.4rem;
+  font-size: 0.85em;
+}
+.ollama-banner details {
+  margin-top: 0.5rem;
+}
+.ollama-banner summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.ollama-banner summary:hover {
+  color: var(--text);
+}
+.ollama-banner ol,
+.ollama-banner ul {
+  margin: 0.5rem 0 0 1rem;
+  font-size: 0.85em;
+}

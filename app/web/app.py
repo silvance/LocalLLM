@@ -333,6 +333,7 @@ async def chat_page(chat_id: str, request: Request):
             "model_options": _model_choices(),
             "active_job_id": active_job_id,
             "agent_enabled": _agent_enabled,
+            "ollama_status": get_ollama_status(),
         },
     )
 
@@ -692,6 +693,7 @@ def _render_review_page(request: Request, loaded, active_job_id=None) -> HTMLRes
             "summaries": summaries,
             "loaded": loaded,
             "active_job_id": active_job_id,
+            "ollama_status": get_ollama_status(),
             "loaded_dict": (
                 {
                     "id": loaded.id,
@@ -1325,6 +1327,10 @@ class _StopRequested(Exception):
 # up immediately.
 _installed_models_cache: "tuple[float, list[str]] | None" = None
 _INSTALLED_MODELS_TTL_S = 30.0
+# Last-known reachability state — populated alongside the model list
+# so templates can render a "can't reach Ollama" banner without
+# duplicating the discovery logic.
+_ollama_status: dict = {"reachable": True, "error": None, "tried_urls": []}
 
 
 def _invalidate_installed_models_cache() -> None:
@@ -1333,6 +1339,20 @@ def _invalidate_installed_models_cache() -> None:
     for the TTL to expire."""
     global _installed_models_cache
     _installed_models_cache = None
+
+
+def get_ollama_status() -> dict:
+    """Snapshot of the last Ollama discovery attempt — what the templates
+    use to decide whether to render the unreachable-banner. Populated
+    inside _ollama_installed_models on every cache miss."""
+    base_url = chat_service.settings.ollama_host or "http://127.0.0.1:11434"
+    return {
+        "reachable": bool(_ollama_status.get("reachable")),
+        "error": _ollama_status.get("error"),
+        "tried_urls": list(_ollama_status.get("tried_urls") or []),
+        "configured_url": base_url,
+        "model_count": len(_ollama_installed_models()),
+    }
 
 
 def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
@@ -1362,11 +1382,15 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
             return cached
 
     base_url = chat_service.settings.ollama_host or "http://127.0.0.1:11434"
+    tried_urls: list[str] = []
+    last_error: str | None = None
 
     # Path 1 — ollama-python client (existing path, fastest).
+    tried_urls.append(f"{base_url} (ollama-python)")
     try:
         resp = chat_service.adapters["granite"].client.list()
     except Exception as exc:
+        last_error = str(exc)
         logger.warning(
             "Ollama list via python client failed (%s); falling back to /api/tags HTTP",
             exc,
@@ -1375,11 +1399,13 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
         names = _parse_ollama_list_response(resp)
         if names:
             _installed_models_cache = (time.monotonic(), names)
+            _ollama_status.update(reachable=True, error=None, tried_urls=tried_urls)
             return names
         logger.warning(
             "Ollama python client returned empty / unrecognised payload (%r); "
             "falling back to /api/tags HTTP", type(resp).__name__,
         )
+        last_error = f"empty payload ({type(resp).__name__})"
 
     # Path 2 — direct HTTP. Doesn't share the python client's response
     # parsing, so it survives ollama-python API changes between
@@ -1396,6 +1422,7 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
     names: list[str] = []
     last_err: Exception | None = None
     for url in candidate_urls:
+        tried_urls.append(f"{url} (HTTP)")
         try:
             names = installed_names(url)
             if names:
@@ -1411,8 +1438,10 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
             last_err = exc
             continue
 
+    reachable = bool(names)
     if not names:
         if last_err is not None:
+            last_error = str(last_err)
             logger.warning(
                 "Ollama list failed at %s: %s. "
                 "If Ollama is running but bound to a non-default address, "
@@ -1420,11 +1449,17 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
                 base_url, last_err,
             )
         else:
+            last_error = "daemon reachable but reported zero models"
             logger.warning(
                 "Ollama at %s returned no models — daemon running but empty?",
                 base_url,
             )
     _installed_models_cache = (time.monotonic(), names)
+    _ollama_status.update(
+        reachable=reachable,
+        error=last_error if not reachable else None,
+        tried_urls=tried_urls,
+    )
     return names
 
 
@@ -1565,6 +1600,7 @@ async def compare_page(request: Request):
             "model_keys": _model_choices(include_auto=False),
             "summaries": _compare_summaries(),
             "tally": comparison_storage.winner_tally(),
+            "ollama_status": get_ollama_status(),
             "loaded": None,
             "active_run": _find_active_compare_run(),
             "agent_enabled": _agent_enabled,
@@ -1584,6 +1620,7 @@ async def compare_load_page(run_id: str, request: Request):
             "model_keys": _model_choices(include_auto=False),
             "summaries": _compare_summaries(),
             "tally": comparison_storage.winner_tally(),
+            "ollama_status": get_ollama_status(),
             "loaded": dataclasses.asdict(loaded),
             "agent_enabled": _agent_enabled,
         },
@@ -1743,6 +1780,7 @@ async def hardware_page(request: Request):
         {
             "hw": payload["hardware"],
             "rec": payload["recommendation"],
+            "ollama_status": get_ollama_status(),
         },
     )
 

@@ -1,0 +1,46 @@
+{# Renders an "Ollama unreachable" banner when ollama_status.reachable
+   is False. Including templates pass ollama_status from
+   get_ollama_status() in app.web.app — no per-template lookup needed.
+   Hidden when reachable so it doesn't add visual noise on the happy
+   path. #}
+{% if ollama_status and not ollama_status.reachable %}
+  <div class="ollama-banner" role="alert">
+    <strong>⚠ Ollama unreachable.</strong>
+    The model dropdown is showing only the preset slots
+    (<code>auto</code> / <code>granite</code> / <code>gemma</code> /
+    <code>qwen</code>) because the daemon at
+    <code>{{ ollama_status.configured_url }}</code> won't accept connections.
+    {% if ollama_status.error %}
+      <div class="ollama-banner-error">
+        <strong>Last error:</strong> <code>{{ ollama_status.error }}</code>
+      </div>
+    {% endif %}
+    <details>
+      <summary>How to fix</summary>
+      <ol>
+        <li>From a terminal: <code>curl {{ ollama_status.configured_url }}/api/tags</code>
+            should return JSON. If it doesn't, Ollama isn't on that URL.</li>
+        <li>Check what URL <code>ollama list</code> uses —
+            <code>echo $env:OLLAMA_HOST</code> (PowerShell) or
+            <code>echo $OLLAMA_HOST</code> (POSIX). If set, copy that exact
+            value into your <code>.env</code> as
+            <code>OLLAMA_HOST=&lt;value&gt;</code> and restart this server.</li>
+        <li>If the daemon is on a non-default port, set
+            <code>OLLAMA_HOST=http://127.0.0.1:&lt;port&gt;</code> in
+            <code>.env</code>.</li>
+        <li>On Windows, prefer <code>127.0.0.1</code> over <code>localhost</code> —
+            modern Windows resolves <code>localhost</code> to <code>::1</code>
+            but Ollama only binds IPv4.</li>
+        <li>Run <code>python -m app.cli doctor</code> for a full diagnostic.</li>
+      </ol>
+      {% if ollama_status.tried_urls %}
+        <p><strong>URLs we tried:</strong></p>
+        <ul>
+          {% for u in ollama_status.tried_urls %}
+            <li><code>{{ u }}</code></li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </details>
+  </div>
+{% endif %}

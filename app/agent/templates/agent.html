@@ -50,6 +50,17 @@
   </aside>
 
   <main class="agent">
+    {% if ollama_status and not ollama_status.reachable %}
+      <div class="ollama-banner" role="alert">
+        <strong>⚠ Ollama unreachable.</strong>
+        Daemon at <code>{{ ollama_status.configured_url }}</code> won't accept connections.
+        {% if ollama_status.error %}<br><small><code>{{ ollama_status.error }}</code></small>{% endif %}
+        <details><summary>How to fix</summary>
+          Set <code>OLLAMA_HOST</code> in <code>.env</code> to whatever URL <code>ollama list</code>
+          uses on your shell (<code>echo $env:OLLAMA_HOST</code>), then restart this server.
+        </details>
+      </div>
+    {% endif %}
     {% if missing_deps %}
       <div class="deps-banner" role="alert">
         <strong>Agent tools are unavailable.</strong>
