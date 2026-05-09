@@ -614,6 +614,180 @@ def gate_protocol_interface_mismatch(code: str) -> GateResult:
     )
 
 
+# --- gate_runtime_anti_patterns ------------------------------------------
+
+
+def _find_busy_loops(tree: ast.AST) -> list[tuple[int, str]]:
+    """Spot `while True/1: pass` (and `while True: continue`) — these
+    burn 100% CPU forever. The right pattern is ``signal.pause()``,
+    ``time.sleep(...)``, ``threading.Event().wait()``, or an actual
+    event loop. Caught from the user's BLE/Wi-Fi sniffer screenshot
+    where the writer used ``while True: pass`` to "hold the program
+    open" while two subprocesses captured packets."""
+    findings: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.While):
+            continue
+        # Recognize True / 1 / non-zero literal as the test.
+        cond = node.test
+        is_truthy = (
+            (isinstance(cond, ast.Constant) and bool(cond.value))
+            or (isinstance(cond, ast.Name) and cond.id == "True")
+        )
+        if not is_truthy:
+            continue
+        # Body is a single `pass` or `continue` — no useful work.
+        body = node.body
+        if len(body) != 1:
+            continue
+        only = body[0]
+        if isinstance(only, ast.Pass):
+            findings.append((
+                node.lineno,
+                "`while True: pass` busy-loop burns 100% CPU forever — "
+                "use `signal.pause()`, `time.sleep(...)`, or "
+                "`threading.Event().wait()` instead",
+            ))
+        elif isinstance(only, ast.Continue):
+            findings.append((
+                node.lineno,
+                "`while True: continue` busy-loop burns 100% CPU forever — "
+                "use `signal.pause()`, `time.sleep(...)`, or "
+                "`threading.Event().wait()` instead",
+            ))
+    return findings
+
+
+def _module_main_block(tree: ast.Module) -> ast.If | None:
+    """Find the top-level ``if __name__ == "__main__":`` block. AST
+    pattern: an If whose test is ``Compare(Name('__name__'), Eq,
+    Constant('__main__'))``. Returns the If node so callers can walk
+    its body, or None if the module has no main guard."""
+    for node in tree.body:
+        if not isinstance(node, ast.If):
+            continue
+        t = node.test
+        if not isinstance(t, ast.Compare):
+            continue
+        if not (isinstance(t.left, ast.Name) and t.left.id == "__name__"):
+            continue
+        if len(t.ops) != 1 or not isinstance(t.ops[0], ast.Eq):
+            continue
+        if len(t.comparators) != 1:
+            continue
+        c = t.comparators[0]
+        if isinstance(c, ast.Constant) and c.value == "__main__":
+            return node
+    return None
+
+
+def _find_conditional_imports_used_module_wide(tree: ast.Module) -> list[tuple[int, str]]:
+    """Spot imports inside ``if __name__ == "__main__":`` whose names
+    are referenced from module-level def bodies. Same-symptom bug from
+    the BLE/Wi-Fi sniffer code:
+
+      def check_wifi_prerequisites():
+          if not shutil.which(tool):  # uses shutil
+              ...
+
+      if __name__ == "__main__":
+          import shutil   # <- import only happens when run as script
+          main()
+
+    This works when run as ``python script.py`` but breaks the moment
+    anyone ``import``s the module — ``check_wifi_prerequisites`` fires
+    NameError on `shutil`. The fix is to move the import to module
+    top-level."""
+    main_block = _module_main_block(tree)
+    if main_block is None:
+        return []
+
+    # Names imported inside the main guard.
+    main_imports: dict[str, int] = {}  # name -> lineno
+    for node in ast.walk(main_block):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                main_imports[bound] = node.lineno
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                main_imports[bound] = node.lineno
+
+    if not main_imports:
+        return []
+
+    # Names referenced inside top-level def / async-def / class bodies.
+    # These run when the module is imported, regardless of __main__.
+    referenced: set[str] = set()
+    for node in tree.body:
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name):
+                referenced.add(sub.id)
+            elif isinstance(sub, ast.Attribute):
+                # `shutil.which` → root is Name('shutil')
+                root = sub.value
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name):
+                    referenced.add(root.id)
+
+    findings: list[tuple[int, str]] = []
+    for name, lineno in main_imports.items():
+        if name in referenced:
+            findings.append((
+                lineno,
+                f"`import {name}` is inside `if __name__ == \"__main__\":` "
+                f"but `{name}` is referenced from a module-level function — "
+                f"breaks if anyone imports this module instead of running "
+                f"it as a script. Move the import to the top of the file.",
+            ))
+    return findings
+
+
+def gate_runtime_anti_patterns(code: str) -> GateResult:
+    """Static catch for two specific runtime-quality bugs the writer
+    keeps producing despite passing every other gate:
+
+    1. ``while True: pass`` / ``while True: continue`` — burns 100% CPU
+       forever. Real fix is ``signal.pause()`` / ``time.sleep`` / an
+       Event.wait().
+    2. Imports inside ``if __name__ == "__main__":`` whose names are
+       referenced from module-level functions — works as a script,
+       breaks as a library.
+
+    Both surfaced from the user's screenshot of qwen3-coder:30b output
+    on a BLE/Wi-Fi sniffer task. Reviewer hallucinated unrelated bugs
+    while missing these — adding a static gate so the bad pattern
+    never reaches the reviewer in the first place."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # gate_syntax already failed and short-circuited; if somehow
+        # we got here, just pass — don't double-report.
+        return GateResult("runtime_anti_patterns", passed=True)
+
+    findings: list[str] = []
+    for lineno, msg in _find_busy_loops(tree):
+        findings.append(f"line {lineno}: {msg}")
+    if isinstance(tree, ast.Module):
+        for lineno, msg in _find_conditional_imports_used_module_wide(tree):
+            findings.append(f"line {lineno}: {msg}")
+
+    if not findings:
+        return GateResult("runtime_anti_patterns", passed=True)
+    return GateResult(
+        "runtime_anti_patterns",
+        passed=False,
+        messages=findings,
+        failure_type="runtime_anti_pattern",
+    )
+
+
 # --- Runner ---------------------------------------------------------------
 
 
@@ -626,6 +800,7 @@ DEFAULT_GATES: tuple[Callable[[str], GateResult], ...] = (
     gate_imports,
     gate_protocol_interface_mismatch,
     gate_no_placeholder_impl,
+    gate_runtime_anti_patterns,
     gate_smoke,
 )
 

@@ -44,6 +44,41 @@ hand-waving is better than confident-sounding fabrication.
 made-up specifics."""
 
 
+# Named runtime-quality anti-patterns the writer keeps producing in
+# real review runs even though every prompt-level "write good code"
+# guidance is in place. Each entry comes from an observed failure
+# in the user's review sessions — the BLE/Wi-Fi sniffer screenshot,
+# specifically. These are STRUCTURAL guidance ("don't write X, write
+# Y instead") rather than aesthetic ("style your code well") because
+# small models route on concrete patterns much better than on abstract
+# guidance. The static gate `gate_runtime_anti_patterns` catches these
+# AFTER they're produced; this layer is the prevention pass.
+REVIEW_WRITER_GUIDANCE = """\
+Code-quality requirements (these are real bugs that have shipped from \
+prior runs — do not produce any of them):
+
+- Never write `while True: pass` or `while True: continue` to keep a \
+process alive. That burns 100% CPU forever. Use `signal.pause()`, \
+`time.sleep(...)` in the loop body alongside real work, or a \
+`threading.Event().wait()` blocked on the actual termination condition.
+- Every `import` must live at the top of the file. NEVER put an `import` \
+inside `if __name__ == "__main__":` if the imported name is referenced \
+from a module-level function. That works as a script but breaks the \
+moment anyone imports the file as a module — the function fires \
+NameError. Stdlib imports especially (`shutil`, `os`, `subprocess`) \
+belong at module top.
+- When you spawn a subprocess and later call `.terminate()` or `.kill()`, \
+also call `.wait()` (with a timeout). Otherwise the parent exits before \
+the child is reaped and you leave zombies / stale pcap files.
+- Verify command-line flags exist before citing them. `btmon --output` \
+is NOT a real flag (the real flag is `-w`). If you don't remember a \
+specific flag, say so and use a placeholder rather than inventing one \
+that looks plausible. Same rule for `iw`, `tshark`, `nmcli`, etc.
+- Don't catch `Exception` to print and continue when the failure means \
+the next step can't possibly work — either let it propagate or actually \
+recover. Empty `except: pass` blocks hide the bug from the operator."""
+
+
 def baseline_enabled() -> bool:
     """The operator can opt out via env var. Default: on."""
     raw = os.getenv("LOCALLLM_DISABLE_BASELINE_PROMPT", "").strip().lower()
@@ -69,3 +104,17 @@ def compose(*layers: str) -> str:
         if cleaned:
             parts.append(cleaned)
     return "\n\n".join(parts)
+
+
+def compose_for_writer(*layers: str) -> str:
+    """Same as ``compose()`` but stacks ``REVIEW_WRITER_GUIDANCE``
+    after the baseline. The /review writer in particular keeps
+    producing the named anti-patterns (busy-loops, conditional
+    imports, fabricated CLI flags) that the static gate then has to
+    catch — this layer is the prevention pass that names them
+    before the model writes the first character. Sits ABOVE the
+    user-supplied system prompt so a user who specifically asks for
+    "produce a placeholder" can still override.
+
+    Honors the same baseline-disabled env var as ``compose()``."""
+    return compose(REVIEW_WRITER_GUIDANCE, *layers)

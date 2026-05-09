@@ -97,7 +97,10 @@ from app.utils.review_storage import (
     ReviewStorage,
     new_session as new_review_session,
 )
-from app.utils.system_prompt import compose as compose_system_prompt
+from app.utils.system_prompt import (
+    compose as compose_system_prompt,
+    compose_for_writer as compose_writer_system_prompt,
+)
 from app.web.job_manager import Job, JobManager
 
 
@@ -1018,8 +1021,15 @@ def _start_review_thread(
             )
 
         def base_messages() -> list[ChatMessage]:
+            # Writer-specific compose: BASELINE + REVIEW_WRITER_GUIDANCE
+            # + user system_prompt. The guidance layer names the
+            # runtime anti-patterns (busy-loops, conditional imports,
+            # fabricated CLI flags) the writer keeps producing, so the
+            # model has been told not to do them BEFORE it writes the
+            # first character — gate_runtime_anti_patterns is still
+            # the post-generation backstop.
             msgs: list[ChatMessage] = []
-            composed = compose_system_prompt(system_prompt)
+            composed = compose_writer_system_prompt(system_prompt)
             if composed:
                 msgs.append(ChatMessage(role="system", content=composed))
             return msgs

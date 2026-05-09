@@ -16,6 +16,7 @@ from app.services.review_gates import (
     gate_imports,
     gate_lint,
     gate_protocol_interface_mismatch,
+    gate_runtime_anti_patterns,
     gate_smoke,
     gate_syntax,
     run_gates,
@@ -602,3 +603,253 @@ def test_format_for_writer_caps_long_message_lists() -> None:
     # 10 listed + a "… and N more" hint
     assert out.count("- issue") == 10
     assert "and 50 more" in out
+
+
+# ---------------------------------------------------------------------------
+# gate_runtime_anti_patterns
+# ---------------------------------------------------------------------------
+
+def test_runtime_anti_patterns_flags_while_true_pass() -> None:
+    """The headline anti-pattern from the user's BLE/Wi-Fi sniffer
+    screenshot — `while True: pass` to "hold the program open" while
+    background captures run. Burns 100% CPU forever; right answer is
+    signal.pause() / time.sleep() / Event.wait()."""
+    code = (
+        "def main():\n"
+        "    print('starting')\n"
+        "    while True:\n"
+        "        pass\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert not r.passed
+    assert r.failure_type == "runtime_anti_pattern"
+    joined = " ".join(r.messages).lower()
+    assert "busy-loop" in joined or "burns 100% cpu" in joined
+    # The fix-suggestion must be in the message — the writer needs
+    # to know what to do, not just what was wrong.
+    assert "signal.pause" in joined or "time.sleep" in joined
+
+
+def test_runtime_anti_patterns_flags_while_true_continue() -> None:
+    """Same anti-pattern, slightly different shape — `while True:
+    continue` is also a 100%-CPU spin."""
+    code = "while True:\n    continue\n"
+    r = gate_runtime_anti_patterns(code)
+    assert not r.passed
+
+
+def test_runtime_anti_patterns_flags_while_one_pass() -> None:
+    """`while 1: pass` — older spelling, same bug. The truthy-literal
+    check must accept ints, not just `True`."""
+    code = "while 1:\n    pass\n"
+    r = gate_runtime_anti_patterns(code)
+    assert not r.passed
+
+
+def test_runtime_anti_patterns_accepts_real_event_loops() -> None:
+    """`while True: <real work>` is fine — that's how event loops
+    work. The gate must NOT false-positive on legitimate patterns
+    like the agent's main loop. Body must have something other than
+    pass/continue."""
+    code = (
+        "import time\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n"
+        "    do_work()\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert r.passed
+
+
+def test_runtime_anti_patterns_accepts_signal_pause() -> None:
+    """The right pattern that the gate's message recommends — must
+    not fire on its own remediation."""
+    code = (
+        "import signal\n"
+        "def hang():\n"
+        "    signal.pause()\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert r.passed
+
+
+def test_runtime_anti_patterns_flags_conditional_import_referenced_module_wide() -> None:
+    """Exact failure from the user's BLE/Wi-Fi sniffer screenshot:
+    `import shutil` lives inside `if __name__ == "__main__":` but
+    `shutil.which` is called from `check_wifi_prerequisites`. Works
+    only when run as `python script.py`; raises NameError as soon as
+    the module is imported. Reviewer missed this; the static gate
+    has to catch it."""
+    code = (
+        "def check_wifi_prerequisites():\n"
+        "    if not shutil.which('iw'):\n"
+        "        return False\n"
+        "    return True\n"
+        "\n"
+        "def main():\n"
+        "    check_wifi_prerequisites()\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    import shutil\n"
+        "    main()\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert not r.passed
+    joined = " ".join(r.messages)
+    assert "shutil" in joined
+    assert "__main__" in joined
+    # Fix-suggestion must be present so the writer knows what to do.
+    assert "top of the file" in joined.lower() or "module top" in joined.lower()
+
+
+def test_runtime_anti_patterns_accepts_main_only_imports_used_only_in_main() -> None:
+    """Imports inside `if __name__ == "__main__":` ARE fine when the
+    name is only used inside the same block — that's actually a
+    reasonable pattern (defer import cost when the file is imported
+    as a library). Don't false-positive."""
+    code = (
+        "def main():\n"
+        "    return 42\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    import argparse\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    main()\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert r.passed
+
+
+def test_runtime_anti_patterns_accepts_top_level_import_used_in_function() -> None:
+    """Standard pattern — top-level import used by a function. Must
+    NOT fire (the gate is specifically about MAIN-block imports)."""
+    code = (
+        "import shutil\n"
+        "\n"
+        "def check():\n"
+        "    return shutil.which('ls')\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert r.passed
+
+
+def test_runtime_anti_patterns_handles_attribute_access_chains() -> None:
+    """`subprocess.Popen.terminate` — the root Name is `subprocess`.
+    The gate's reference-walker must dig through Attribute chains to
+    find that root, otherwise it misses cases where the imported
+    module is used via `.foo.bar` access."""
+    code = (
+        "def run():\n"
+        "    p = subprocess.Popen(['ls'])\n"
+        "    return p\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    import subprocess\n"
+        "    run()\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert not r.passed
+    assert "subprocess" in " ".join(r.messages)
+
+
+def test_runtime_anti_patterns_full_screenshot_regression() -> None:
+    """End-to-end on the EXACT code from the user's screenshot —
+    must catch BOTH the `while True: pass` busy-loop AND the
+    `import shutil` inside `if __name__ == "__main__":` while
+    `shutil.which` is referenced from check_wifi_prerequisites /
+    check_ble_prerequisites. Two findings expected."""
+    code = '''
+import subprocess
+
+def check_wifi_prerequisites():
+    required_tools = ['iw', 'tshark', 'tcpdump']
+    for tool in required_tools:
+        if not shutil.which(tool):
+            return False
+    return True
+
+def check_ble_prerequisites():
+    required_tools = ['bluetoothctl', 'btmgmt', 'btmon']
+    for tool in required_tools:
+        if not shutil.which(tool):
+            return False
+    return True
+
+def main():
+    if not check_wifi_prerequisites():
+        return
+    if not check_ble_prerequisites():
+        return
+    print("Captures running... Press Ctrl+C to stop.")
+    while True:
+        pass
+
+if __name__ == "__main__":
+    import shutil
+    main()
+'''
+    r = gate_runtime_anti_patterns(code)
+    assert not r.passed
+    joined = " ".join(r.messages).lower()
+    # Both bugs surfaced.
+    assert "busy-loop" in joined or "100% cpu" in joined
+    assert "shutil" in joined
+    assert "__main__" in joined
+
+
+def test_runtime_anti_patterns_no_main_guard_does_not_false_positive() -> None:
+    """Modules without an `if __name__ == "__main__":` block — most
+    library files — must pass the conditional-import check trivially.
+    Defensive: the gate's traversal must not crash when the guard
+    isn't there."""
+    code = (
+        "import shutil\n"
+        "\n"
+        "def check():\n"
+        "    return shutil.which('ls')\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert r.passed
+
+
+def test_runtime_anti_patterns_passes_clean_code() -> None:
+    """Clean implementation — neither anti-pattern present. Pass."""
+    code = (
+        "import time\n"
+        "\n"
+        "def hang():\n"
+        "    while not done():\n"
+        "        time.sleep(0.5)\n"
+        "\n"
+        "def done():\n"
+        "    return False\n"
+    )
+    r = gate_runtime_anti_patterns(code)
+    assert r.passed
+
+
+def test_runtime_anti_patterns_short_circuits_on_syntax_error() -> None:
+    """If the code doesn't parse, gate_syntax already failed and
+    short-circuited the chain. If we somehow get called anyway,
+    don't double-report — pass quietly."""
+    r = gate_runtime_anti_patterns("def )( bad syntax")
+    assert r.passed
+
+
+def test_runtime_anti_patterns_in_default_chain() -> None:
+    """Wiring smoke check — gate must be in DEFAULT_GATES so it runs
+    on every review without explicit opt-in."""
+    assert gate_runtime_anti_patterns in DEFAULT_GATES
+
+
+def test_runtime_anti_patterns_runs_after_no_placeholder_impl() -> None:
+    """Order matters — runtime-anti-patterns is a quality check that
+    only makes sense on code that already passed syntax/lint/imports.
+    Must come after gate_no_placeholder_impl (which catches obviously
+    fake scaffolding) and before gate_smoke (which actually executes
+    the code — no point trying to import code that has busy-loops)."""
+    from app.services.review_gates import gate_no_placeholder_impl
+    idx_pre = DEFAULT_GATES.index(gate_no_placeholder_impl)
+    idx_anti = DEFAULT_GATES.index(gate_runtime_anti_patterns)
+    idx_smoke = DEFAULT_GATES.index(gate_smoke)
+    assert idx_pre < idx_anti < idx_smoke
