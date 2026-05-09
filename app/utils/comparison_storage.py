@@ -54,9 +54,10 @@ class ComparisonStorage:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, run_id: str) -> Path:
-        if "/" in run_id or "\\" in run_id or run_id.startswith("."):
-            raise ValueError(f"invalid run id: {run_id!r}")
-        return self.base_dir / f"{run_id}.json"
+        # Whitelist + resolve-and-contained check. See chat_storage._path
+        # for the path-traversal rationale (Windows drive-letter trap).
+        from app.utils.storage_ids import safe_storage_path
+        return safe_storage_path(self.base_dir, run_id, kind="comparison")
 
     def save(self, run: ComparisonRun) -> None:
         path = self._path(run.id)

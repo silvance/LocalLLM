@@ -213,3 +213,31 @@ def test_start_adopts_existing_server_on_port() -> None:
 def test_base_url_format() -> None:
     sup = OllamaSupervisor(host="1.2.3.4", port=9999)
     assert sup.base_url == "http://1.2.3.4:9999"
+
+
+def test_safe_ollama_env_drops_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Subprocess env must not inherit AWS_*, GH_TOKEN, LOCALLLM_*,
+    HTTP_PROXY etc. from the parent shell — the ollama child reads
+    HTTPS_PROXY itself and we don't want a stale corp proxy in the
+    operator's shell silently routing model traffic."""
+    from app.runtime.ollama_supervisor import _safe_ollama_env
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "do-not-leak")
+    monkeypatch.setenv("GH_TOKEN", "ghp_do_not_leak")
+    monkeypatch.setenv("LOCALLLM_DATA_DIR", "/tmp/sensitive")
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy:8080")
+    env = _safe_ollama_env()
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "GH_TOKEN" not in env
+    assert "LOCALLLM_DATA_DIR" not in env
+    assert "HTTPS_PROXY" not in env
+
+
+def test_safe_ollama_env_keeps_ollama_runtime_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OLLAMA_KEEP_ALIVE / OLLAMA_NUM_PARALLEL / CUDA_VISIBLE_DEVICES
+    are vars Ollama itself reads — don't strip them."""
+    from app.runtime.ollama_supervisor import _safe_ollama_env
+    monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "10m")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    env = _safe_ollama_env()
+    assert env.get("OLLAMA_KEEP_ALIVE") == "10m"
+    assert env.get("CUDA_VISIBLE_DEVICES") == "0,1"

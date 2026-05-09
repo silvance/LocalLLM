@@ -22,6 +22,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -116,6 +117,71 @@ outcomes_log = OutcomeLog(default_log_path())
 
 
 app = FastAPI(title="LocalLLM")
+
+
+# ---------------------------------------------------------------------------
+# Origin guard (CSRF defense for the local-only threat model)
+# ---------------------------------------------------------------------------
+# LocalLLM's threat model assumes the operator only ever uses it from a
+# browser tab pointed at 127.0.0.1. Without an Origin check, ANY web
+# page the operator visits during a forensics session can issue
+# DELETE /chats/<id>, POST /api/ollama/pull (queue arbitrary downloads),
+# POST /api/review (burn GPU cycles), etc. Reject non-GET/HEAD requests
+# whose Origin or Referer host isn't localhost.
+#
+# Disable for testing / proxied setups via LOCALLLM_DISABLE_ORIGIN_GUARD=1.
+
+_SAFE_ORIGIN_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _origin_guard_disabled() -> bool:
+    return os.environ.get("LOCALLLM_DISABLE_ORIGIN_GUARD", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+@app.exception_handler(ValueError)
+async def _value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """ValueError at the API boundary maps to a 400. Storage-layer
+    ID validators raise ValueError on invalid chat / review / run IDs
+    (e.g. ``C:foo`` from a CSRF attempt or a fuzzer); without this
+    handler they bubble up as 500 and leak the stack trace."""
+    return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.middleware("http")
+async def _origin_guard(request: Request, call_next):
+    method = request.method.upper()
+    if method in ("GET", "HEAD", "OPTIONS"):
+        return await call_next(request)
+    if _origin_guard_disabled():
+        return await call_next(request)
+
+    # Same-origin browser fetches always carry one of these headers.
+    # CLI / curl requests don't, but they don't send Origin either, so
+    # they pass — that's the local-only operator using the app
+    # programmatically. Cross-origin browser requests DO send Origin
+    # (for non-simple methods / non-simple bodies) and that's what we
+    # reject.
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if origin is None:
+        return await call_next(request)
+
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(origin).hostname or ""
+    except Exception:
+        host = ""
+    if host in _SAFE_ORIGIN_HOSTS:
+        return await call_next(request)
+
+    logger.warning("Rejecting %s %s from origin %r", method, request.url.path, origin)
+    return JSONResponse(
+        status_code=403,
+        content={"detail": f"cross-origin request from {host!r} blocked"},
+    )
+
+
 app.mount("/static", NoCacheStaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 # Online agent variant — only present when app/agent/ is on disk. The
@@ -429,38 +495,41 @@ async def stream_job(job_id: str) -> StreamingResponse:
     tokens as the producer emits them. If the job is already in a terminal
     state we emit one 'done' event and close.
     """
-    job, queue = job_manager.subscribe(job_id)
-    if job is None or queue is None:
+    job, queue, snapshot = job_manager.subscribe_with_snapshot(job_id)
+    if job is None or queue is None or snapshot is None:
         raise HTTPException(404, f"job {job_id} not found")
 
     async def gen() -> AsyncIterator[bytes]:
         try:
-            # Replay buffered state. If the job has checkpoints (e.g. review
-            # page section_starts), interleave them with the corresponding
-            # text slices so late subscribers see the structure too. Without
-            # this, a client that subscribed after a section_start fires
-            # would see the tokens for that section but no marker telling
-            # the UI which role/model they belong to — i.e. silent void.
-            if job.checkpoints:
+            # Replay from the FROZEN snapshot taken under the lock at
+            # subscribe time, not from live job.* fields — otherwise the
+            # producer thread can append a checkpoint between snapshot
+            # reads and we end up duplicating chunks (or pointing at a
+            # `pos` that doesn't exist in the text we sliced). The
+            # remainder of the live stream comes through `queue` below.
+            text = snapshot["text"]
+            checkpoints = snapshot["checkpoints"]
+            status = snapshot["status"]
+            if checkpoints:
                 last_pos = 0
-                for event, payload, pos in job.checkpoints:
+                for event, payload, pos in checkpoints:
                     if pos > last_pos:
-                        yield _sse("token", {"chunk": job.text[last_pos:pos]})
+                        yield _sse("token", {"chunk": text[last_pos:pos]})
                     yield _sse(event, payload)
                     last_pos = pos
-                if last_pos < len(job.text):
-                    yield _sse("token", {"chunk": job.text[last_pos:]})
-            elif job.text:
-                yield _sse("token", {"chunk": job.text})
+                if last_pos < len(text):
+                    yield _sse("token", {"chunk": text[last_pos:]})
+            elif text:
+                yield _sse("token", {"chunk": text})
 
-            if job.status in ("done", "error", "stopped"):
+            if status in ("done", "error", "stopped"):
                 yield _sse(
                     "done",
                     {
-                        "status": job.status,
-                        "error": job.error,
-                        "metadata": job.metadata,
-                        "text": job.text,
+                        "status": status,
+                        "error": snapshot["error"],
+                        "metadata": snapshot["metadata"],
+                        "text": text,
                     },
                 )
                 return
@@ -786,11 +855,18 @@ def _start_review_thread(
         # Remaining fallbacks. fallback_writer_model accepts comma-
         # separated names so the operator can configure a chain
         # (e.g. "deepseek-coder-v2:latest,granite4") and the swap
-        # logic pops the next one each time.
+        # logic pops the next one each time. Dedupe against the
+        # primary writer so "qwen,granite,qwen" doesn't waste a
+        # unique-builder slot on the same model twice.
         if fallback_writer_model:
-            fallback_chain: list[str] = [
-                m.strip() for m in fallback_writer_model.split(",") if m.strip()
-            ]
+            seen_chain: set[str] = {writer_model}
+            fallback_chain: list[str] = []
+            for m in fallback_writer_model.split(","):
+                m = m.strip()
+                if not m or m in seen_chain:
+                    continue
+                seen_chain.add(m)
+                fallback_chain.append(m)
         else:
             fallback_chain = []
         # Reviewer blocker frequency. Normalised text → count across
@@ -890,11 +966,11 @@ def _start_review_thread(
             sections.append({"role": role, "model": model, "text": text})
 
         def _normalize_blocker(text: str) -> str:
-            """Canonical key for blocker-repetition counting. Lowercase,
-            collapse whitespace, truncate so trivial wording differences
-            ("missing import os" vs "missing import os.path") still
-            count as the same blocker if they're effectively the same."""
-            return " ".join(text.lower().split())[:200]
+            """Canonical key for blocker-repetition counting. casefold +
+            collapse whitespace + truncate so trivial wording
+            differences (and locale-quirky lowercase like Turkish
+            dotted/dotless I) still match as the same blocker."""
+            return " ".join(text.casefold().split())[:200]
 
         def gate_or_review(writer_text: str) -> None:
             """Run static-analysis gates on the writer's latest output.
@@ -1275,8 +1351,13 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
     """
     import time
     global _installed_models_cache
-    if not force_refresh and _installed_models_cache is not None:
-        ts, cached = _installed_models_cache
+    # Snapshot the tuple to a local before unpacking — a concurrent
+    # invalidate (from the pull-thread completion path) could None
+    # this out between the `is not None` check and the unpack,
+    # raising TypeError.
+    snapshot = _installed_models_cache
+    if not force_refresh and snapshot is not None:
+        ts, cached = snapshot
         if time.monotonic() - ts < _INSTALLED_MODELS_TTL_S:
             return cached
 
@@ -1688,25 +1769,29 @@ def _start_pull_thread(job: Job, model: str, loop: asyncio.AbstractEventLoop) ->
     base_url = settings.ollama_host or "http://127.0.0.1:11434"
 
     def _runner() -> None:
+        gen = pull_model(model, base_url=base_url)
         try:
             terminal_status = "done"
             error_text: str | None = None
-            for event in pull_model(model, base_url=base_url):
-                if job_manager.is_stop_requested(job.id):
-                    terminal_status = "stopped"
-                    break
-                if "error" in event:
-                    terminal_status = "error"
-                    error_text = str(event["error"])
+            try:
+                for event in gen:
+                    if job_manager.is_stop_requested(job.id):
+                        terminal_status = "stopped"
+                        break
+                    if "error" in event:
+                        terminal_status = "error"
+                        error_text = str(event["error"])
+                        job_manager.emit_event(job.id, "pull_event", event, loop)
+                        break
+                    # Pumping as a structural event (not a token) so the
+                    # frontend can render a progress bar from the
+                    # `total` / `completed` fields without parsing prose.
                     job_manager.emit_event(job.id, "pull_event", event, loop)
-                    break
-                # Pumping as a structural event (not a token) so the
-                # frontend can render a progress bar from the
-                # `total` / `completed` fields without parsing prose.
-                job_manager.emit_event(job.id, "pull_event", event, loop)
-            # Force the dropdown cache to refresh on the next page
-            # render so the freshly-pulled model shows up immediately
-            # (without waiting for the TTL to expire).
+            finally:
+                # Close the generator explicitly so its underlying
+                # urlopen response closes immediately on stop / break,
+                # rather than leaking until GC.
+                gen.close()
             if terminal_status == "done":
                 _invalidate_installed_models_cache()
             job_manager.finish(

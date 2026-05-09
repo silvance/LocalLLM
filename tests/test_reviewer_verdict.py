@@ -96,6 +96,34 @@ def test_parse_empty_text_treated_as_approve() -> None:
     assert v.next_action == "approve"
 
 
+def test_parse_pass_true_with_rebuild_same_writer_forces_approve() -> None:
+    """Some local models emit `pass: true` and `rebuild_same_writer`
+    in the same JSON — the orchestrator only short-circuits on
+    `approve`, so without the parser forcing consistency the loop
+    runs another pointless writer round on already-approved code."""
+    text = (
+        "```json\n"
+        '{"pass": true, "blockers": [], "safe_to_rebuild": true, '
+        '"recommended_next_action": "rebuild_same_writer"}\n```'
+    )
+    v = parse(text)
+    assert v.passed is True
+    assert v.next_action == "approve"
+
+
+def test_parse_pass_false_with_approve_clamps_to_rebuild() -> None:
+    """Inverse contradiction — pass=false but action=approve. Treat
+    as the safest repairable interpretation."""
+    text = (
+        "```json\n"
+        '{"pass": false, "blockers": ["bug"], "safe_to_rebuild": true, '
+        '"recommended_next_action": "approve"}\n```'
+    )
+    v = parse(text)
+    assert v.passed is False
+    assert v.next_action == "rebuild_same_writer"
+
+
 def test_parse_unknown_action_clamps_to_safest() -> None:
     text = (
         "```json\n"

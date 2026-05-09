@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.schemas.chat import ChatMessage
+from app.utils.storage_ids import safe_storage_path
 
 
 logger = logging.getLogger("localllm")
@@ -105,10 +106,14 @@ class ChatStorage:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, chat_id: str) -> Path:
-        # Defend against path traversal — chat_id should be a UUID but check.
-        if "/" in chat_id or "\\" in chat_id or chat_id.startswith("."):
-            raise ValueError(f"invalid chat id: {chat_id!r}")
-        return self.base_dir / f"{chat_id}.json"
+        # Validate chat_id against a UUID-like whitelist AND confirm
+        # the resolved path stays under base_dir. The previous guard
+        # only rejected slash/backslash/leading-dot, but `C:foo` slips
+        # through on Windows because pathlib treats `C:` as a drive
+        # anchor — `Path("data/chats") / "C:evil"` resolves to
+        # `C:evil`, which a malicious cross-origin request to
+        # `DELETE /chats/C:evil` could then unlink.
+        return safe_storage_path(self.base_dir, chat_id, kind="chat")
 
     def list_summaries(self) -> list[ChatSummary]:
         out: list[ChatSummary] = []
