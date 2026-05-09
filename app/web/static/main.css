@@ -239,8 +239,11 @@ button {
      so the scrollbar sits at the chat-column edge (with breathing
      room from the right-aligned user bubble) instead of right next
      to the bubble where the column ends. */
-  flex: 1;
-  min-height: 0;
+  /* Grow to fill short chats, but do not shrink below the natural
+     height of long chats. When this was `flex: 1`, tall assistant
+     messages could overflow out of this flex item and slide under the
+     sticky composer. */
+  flex: 1 0 auto;
   padding: 1.5rem 2rem;
   display: flex;
   flex-direction: column;

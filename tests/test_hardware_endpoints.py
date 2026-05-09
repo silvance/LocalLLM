@@ -41,6 +41,35 @@ def test_pull_rejects_empty_model(client: TestClient) -> None:
     assert r.status_code == 400
 
 
+def test_delete_rejects_invalid_model_name(client: TestClient) -> None:
+    r = client.post("/api/ollama/delete", json={"model": "bad;name"})
+    assert r.status_code == 400
+
+
+def test_delete_calls_ollama_daemon_and_invalidates_cache(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    from app.web import app as web_app
+
+    called = {"model": None, "base_url": None, "invalidated": False}
+
+    def _fake_delete(model: str, base_url: str) -> None:
+        called["model"] = model
+        called["base_url"] = base_url
+
+    monkeypatch.setattr("app.services.ollama_models.delete_model", _fake_delete)
+    monkeypatch.setattr(
+        web_app,
+        "_invalidate_installed_models_cache",
+        lambda: called.__setitem__("invalidated", True),
+    )
+    r = client.post("/api/ollama/delete", json={"model": "granite4:latest"})
+    assert r.status_code == 200
+    assert called["model"] == "granite4:latest"
+    assert called["base_url"]
+    assert called["invalidated"] is True
+
+
 def test_pull_returns_job_id_and_kicks_off_thread(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:

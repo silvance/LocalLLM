@@ -90,3 +90,16 @@ def test_compose_trims_user_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
     out = compose(padded)
     assert out.endswith("Be brief.")
     assert "  Be brief." not in out  # leading whitespace stripped
+
+
+def test_default_system_prompt_does_not_force_code_for_normal_questions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEFAULT_SYSTEM_PROMPT", raising=False)
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    prompt = get_settings().default_system_prompt.lower()
+    assert "for normal questions" in prompt
+    assert "do not turn those answers into code" in prompt
+    assert "only produce code when the user asks" in prompt

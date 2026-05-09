@@ -57,6 +57,27 @@ class GateResult:
     #   - "missing_known_dependency"    (real dep, not installed locally)
     #   - "protocol_interface_mismatch" (BLE on Wi-Fi iface, etc.)
     failure_type: str = ""
+    # Conventional values: info | warning | error | critical. Kept as
+    # a free string so new gate categories do not require schema churn.
+    severity: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.severity:
+            if self.passed:
+                self.severity = "info"
+            elif self.blocked:
+                self.severity = "warning"
+            else:
+                self.severity = "error"
+
+    @property
+    def status(self) -> str:
+        """New taxonomy while preserving the legacy ``passed`` bool."""
+        if self.passed:
+            return "pass"
+        if self.blocked:
+            return "blocked"
+        return "fail"
 
     @property
     def is_terminal_failure(self) -> bool:
@@ -97,8 +118,33 @@ def gate_candidate_count(text: str) -> GateResult:
     the extracted code via the standard run_gates pipeline.
     """
     from app.utils.code_linter import extract_python_blocks
+    if _has_unclosed_python_fence(text or ""):
+        return GateResult(
+            "candidate_count",
+            passed=False,
+            messages=[
+                "invalid_fence: an explicit ```python``` fence was opened "
+                "but not closed. Resubmit exactly one complete fenced block.",
+            ],
+            failure_type="invalid_fence",
+            severity="error",
+        )
     blocks = extract_python_blocks(text or "")
     n = len(blocks)
+    for block in blocks:
+        marker = _transcript_marker(block)
+        if marker:
+            return GateResult(
+                "candidate_count",
+                passed=False,
+                messages=[
+                    f"duplicate_output: python block contains transcript / "
+                    f"orchestrator text marker {marker!r}. Return only the "
+                    f"candidate program, not prior gate feedback or review logs.",
+                ],
+                failure_type="duplicate_output",
+                severity="error",
+            )
     if n == 1:
         return GateResult("candidate_count", passed=True)
     if n == 0:
@@ -112,6 +158,8 @@ def gate_candidate_count(text: str) -> GateResult:
                 "rejected because untagged blocks were grabbing bash setup "
                 "snippets and false-flagging them as Python).",
             ],
+            failure_type="no_candidate",
+            severity="error",
         )
     return GateResult(
         "candidate_count",
@@ -123,7 +171,41 @@ def gate_candidate_count(text: str) -> GateResult:
             f"or 'here's option A / option B' framing. Pick the version "
             f"you actually intend the user to run.",
         ],
+        failure_type="multiple_candidates",
+        severity="error",
     )
+
+
+_TRANSCRIPT_MARKERS: tuple[str, ...] = (
+    "Static Analysis:",
+    "Gate:",
+    "Your previous code did not pass",
+    "Your previous code failed static-analysis gates",
+    "Rewrite:",
+    "Switch to",
+)
+
+
+def _transcript_marker(block: str) -> str:
+    for marker in _TRANSCRIPT_MARKERS:
+        if marker in block:
+            return marker
+    return ""
+
+
+def _has_unclosed_python_fence(text: str) -> bool:
+    in_python = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("```"):
+            continue
+        if in_python:
+            in_python = False
+            continue
+        info = stripped[3:].strip().casefold()
+        if info in {"python", "py"}:
+            in_python = True
+    return in_python
 
 
 def gate_syntax(code: str) -> GateResult:
@@ -139,6 +221,8 @@ def gate_syntax(code: str) -> GateResult:
             "syntax",
             passed=False,
             messages=[f"{line}{col}: {exc.msg}"],
+            failure_type="syntax_error",
+            severity="error",
         )
     return GateResult("syntax", passed=True)
 
@@ -152,7 +236,13 @@ def gate_lint(code: str) -> GateResult:
     if not findings:
         return GateResult("lint", passed=True)
     msgs = [f"line {f.line}: {f.message}" for f in findings]
-    return GateResult("lint", passed=False, messages=msgs)
+    return GateResult(
+        "lint",
+        passed=False,
+        messages=msgs,
+        failure_type="lint_error",
+        severity="error",
+    )
 
 
 _STDLIB_MODULES: frozenset[str] = frozenset(
@@ -308,6 +398,7 @@ def gate_imports(code: str) -> GateResult:
             passed=False,
             messages=msgs,
             failure_type="likely_fake_import",
+            severity="error",
         )
 
     # Only allowlisted modules missing → environment problem.
@@ -317,6 +408,7 @@ def gate_imports(code: str) -> GateResult:
         messages=blocked_imports,
         blocked=True,
         failure_type="missing_known_dependency",
+        severity="warning",
     )
 
 
@@ -374,6 +466,8 @@ def gate_smoke(code: str, *, timeout: float = 5.0) -> GateResult:
             return GateResult(
                 "smoke", passed=False,
                 messages=[f"could not write candidate to disk: {exc}"],
+                failure_type="smoke_write_error",
+                severity="error",
             )
         try:
             proc = subprocess.run(
@@ -393,19 +487,29 @@ def gate_smoke(code: str, *, timeout: float = 5.0) -> GateResult:
                 "smoke",
                 passed=False,
                 messages=[f"import timed out after {timeout}s"],
+                failure_type="smoke_timeout",
+                severity="warning",
             )
         except OSError as exc:
             return GateResult(
                 "smoke",
                 passed=False,
                 messages=[f"could not invoke python: {exc}"],
+                failure_type="smoke_runtime_error",
+                severity="error",
             )
         if proc.returncode == 0:
             return GateResult("smoke", passed=True)
         # Squash the traceback into a few lines so it doesn't
         # dominate the writer's next prompt.
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-5:]
-        return GateResult("smoke", passed=False, messages=tail or ["import failed"])
+        return GateResult(
+            "smoke",
+            passed=False,
+            messages=tail or ["import failed"],
+            failure_type="smoke_runtime_error",
+            severity="error",
+        )
 
 
 # --- gate_no_placeholder_impl --------------------------------------------
@@ -500,6 +604,8 @@ def gate_no_placeholder_impl(code: str) -> GateResult:
         "real_implementation",
         passed=False,
         messages=findings[:15],
+        failure_type="fake_implementation",
+        severity="critical",
     )
 
 
@@ -611,6 +717,7 @@ def gate_protocol_interface_mismatch(code: str) -> GateResult:
         passed=False,
         messages=findings[:10],
         failure_type="protocol_interface_mismatch",
+        severity="critical",
     )
 
 
@@ -653,6 +760,7 @@ def run_gates(
                 passed=False,
                 blocked=True,
                 failure_type="missing_known_dependency",
+                severity="warning",
                 messages=["(skipped — depends on a known third-party package not installed locally)"],
             ))
             continue

@@ -6,9 +6,11 @@
   const $stream = document.getElementById("agent-stream");
   const $status = document.getElementById("agent-status");
   const $model = document.getElementById("agent-model");
+  const loadedAgent = window.LOCALLLM && window.LOCALLLM.loadedAgent;
 
   let activeJobId = null;
   let activeSource = null;
+  let currentAgentId = (loadedAgent && loadedAgent.id) || null;
 
   function escapeHtml(s) {
     return String(s ?? "")
@@ -38,6 +40,60 @@
     $stream.appendChild(ev);
     if (wasNearBottom) scrollToBottom();
     return ev;
+  }
+
+  function renderAgentEvent(kind, payload) {
+    const d = payload || {};
+    if (kind === "user_prompt") {
+      appendEvent("user", "User", escapeHtml(d.prompt || "").replace(/\n/g, "<br>"));
+      return;
+    }
+    if (kind === "step_start") {
+      appendEvent("step", `Step ${(d.iteration || 0) + 1}`, '<span class="muted-note">model is thinking…</span>');
+      return;
+    }
+    if (kind === "model_text") {
+      appendEvent("step", "Reasoning", escapeHtml(d.content || "").replace(/\n/g, "<br>"));
+      return;
+    }
+    if (kind === "tool_call") {
+      const argsJson = JSON.stringify(d.args || {}, null, 2);
+      appendEvent(
+        "tool-call",
+        `→ tool: ${d.name || ""}`,
+        `<details open><summary>args</summary><pre>${escapeHtml(argsJson)}</pre></details>`,
+      );
+      return;
+    }
+    if (kind === "tool_result") {
+      let body;
+      if (d.name === "web_search" && d.result && Array.isArray(d.result.results)) {
+        body = renderSearchResults(d.result.results);
+      } else if (d.name === "http_fetch" && d.result && typeof d.result.text === "string") {
+        body = renderFetchResult(d.result);
+      } else {
+        body = `<pre>${escapeHtml(JSON.stringify(d.result || {}, null, 2))}</pre>`;
+      }
+      appendEvent("tool-result", `← result: ${d.name || ""}`, body);
+      return;
+    }
+    if (kind === "tool_error") {
+      appendEvent("tool-error", `× tool failed: ${d.name || ""}`, renderToolError(d.error || ""));
+      return;
+    }
+    if (kind === "error") {
+      appendEvent("error", "ERROR", escapeHtml(d.error || ""));
+      return;
+    }
+    if (kind === "final") {
+      appendEvent(
+        "final",
+        `Final answer (${escapeHtml(d.model || "")}, ${escapeHtml(d.status || "done")})`,
+        escapeHtml(d.answer || "").replace(/\n/g, "<br>"),
+      );
+      return;
+    }
+    appendEvent("step", kind || "Event", `<pre>${escapeHtml(JSON.stringify(d, null, 2))}</pre>`);
   }
 
   function renderSearchResults(results) {
@@ -94,15 +150,64 @@
     $stream.innerHTML = "";
   }
 
+  function ensureHistoryRow(agentId, title, status) {
+    const list = document.querySelector(".sessions .chat-list");
+    if (!list || !agentId) return;
+    const existing = list.querySelector(`[data-agent-id="${CSS.escape(agentId)}"]`);
+    if (existing) return;
+    const row = document.createElement("li");
+    row.className = "chat-row active";
+    row.innerHTML =
+      `<a href="/agent/${escapeHtml(agentId)}" class="chat-link" title="${escapeHtml(title || "New agent run")}">` +
+        `${escapeHtml(title || "New agent run")}` +
+        `<span class="count">${escapeHtml(status || "running")}</span>` +
+      `</a>` +
+      `<button type="button" class="btn ghost del-agent" data-agent-id="${escapeHtml(agentId)}" title="Delete this agent run">✕</button>`;
+    list.prepend(row);
+  }
+
+  function renderLoadedSession(session) {
+    if (!session) return;
+    clearStream();
+    $promptInput.value = "";
+    if (session.model && Array.from($model.options).some((o) => o.value === session.model)) {
+      $model.value = session.model;
+    }
+    const events = session.events || [];
+    const hasUserPrompt = events.some((ev) => ev.kind === "user_prompt");
+    const hasFinal = events.some((ev) => ev.kind === "final");
+    if (!hasUserPrompt && (session.prompt || "").trim()) {
+      renderAgentEvent("user_prompt", { prompt: session.prompt });
+    }
+    for (const ev of events) {
+      renderAgentEvent(ev.kind, ev.payload || {});
+    }
+    if (!hasFinal && (session.answer || "").trim()) {
+      appendEvent(
+        "final",
+        `Final answer (${escapeHtml(session.model || "")}, ${escapeHtml(session.status || "done")})`,
+        escapeHtml(session.answer || "").replace(/\n/g, "<br>"),
+      );
+    } else if (session.error) {
+      appendEvent("error", "ERROR", escapeHtml(session.error));
+    } else if (session.events && session.events.length) {
+      appendEvent("final", `Saved run (${escapeHtml(session.status || "pending")})`, '<span class="muted-note">no final answer was saved</span>');
+    }
+    setStatus(session.status ? `saved (${session.status})` : "saved", "");
+  }
+
   function startAgent() {
     const prompt = $promptInput.value.trim();
     if (!prompt) return;
 
-    clearStream();
+    if (!loadedAgent) clearStream();
     setStatus("starting…", "");
     $runBtn.disabled = true;
 
-    fetch("/api/agent", {
+    const endpoint = currentAgentId
+      ? `/api/agent/${encodeURIComponent(currentAgentId)}/messages`
+      : "/api/agent";
+    fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt, model: $model.value }),
@@ -113,6 +218,15 @@
       })
       .then(data => {
         if (!data.job_id) throw new Error("no job id returned");
+        $promptInput.value = "";
+        if (data.agent_id) {
+          currentAgentId = data.agent_id;
+          $runBtn.textContent = "▶ Send follow-up";
+        }
+        if (endpoint === "/api/agent" && data.agent_id) {
+          history.replaceState(null, "", `/agent/${data.agent_id}`);
+          ensureHistoryRow(data.agent_id, data.title, "running");
+        }
         subscribe(data.job_id);
       })
       .catch(err => {
@@ -129,48 +243,16 @@
     activeSource = src;
     setStatus("running…", "");
 
-    src.addEventListener("step_start", (e) => {
-      const d = JSON.parse(e.data);
-      appendEvent("step", `Step ${d.iteration + 1}`, '<span class="muted-note">model is thinking…</span>');
-    });
-
-    src.addEventListener("model_text", (e) => {
-      const d = JSON.parse(e.data);
-      appendEvent("step", "Reasoning", escapeHtml(d.content || "").replace(/\n/g, "<br>"));
-    });
-
-    src.addEventListener("tool_call", (e) => {
-      const d = JSON.parse(e.data);
-      const argsJson = JSON.stringify(d.args || {}, null, 2);
-      appendEvent(
-        "tool-call",
-        `→ tool: ${d.name}`,
-        `<details open><summary>args</summary><pre>${escapeHtml(argsJson)}</pre></details>`,
-      );
-    });
-
-    src.addEventListener("tool_result", (e) => {
-      const d = JSON.parse(e.data);
-      let body;
-      if (d.name === "web_search" && d.result && Array.isArray(d.result.results)) {
-        body = renderSearchResults(d.result.results);
-      } else if (d.name === "http_fetch" && d.result && typeof d.result.text === "string") {
-        body = renderFetchResult(d.result);
-      } else {
-        body = `<pre>${escapeHtml(JSON.stringify(d.result || {}, null, 2))}</pre>`;
-      }
-      appendEvent("tool-result", `← result: ${d.name}`, body);
-    });
-
-    src.addEventListener("tool_error", (e) => {
-      const d = JSON.parse(e.data);
-      appendEvent("tool-error", `× tool failed: ${d.name}`, renderToolError(d.error || ""));
-    });
+    src.addEventListener("step_start", (e) => renderAgentEvent("step_start", JSON.parse(e.data)));
+    src.addEventListener("user_prompt", (e) => renderAgentEvent("user_prompt", JSON.parse(e.data)));
+    src.addEventListener("model_text", (e) => renderAgentEvent("model_text", JSON.parse(e.data)));
+    src.addEventListener("tool_call", (e) => renderAgentEvent("tool_call", JSON.parse(e.data)));
+    src.addEventListener("tool_result", (e) => renderAgentEvent("tool_result", JSON.parse(e.data)));
+    src.addEventListener("tool_error", (e) => renderAgentEvent("tool_error", JSON.parse(e.data)));
 
     src.addEventListener("error", (e) => {
       try {
-        const d = JSON.parse(e.data);
-        appendEvent("error", "ERROR", escapeHtml(d.error || ""));
+        renderAgentEvent("error", JSON.parse(e.data));
       } catch (_) { /* native EventSource error event has no data */ }
     });
 
@@ -209,11 +291,31 @@
     }
   });
 
+  const $sessions = document.querySelector(".sessions");
+  if ($sessions) {
+    $sessions.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".del-agent");
+      if (!btn) return;
+      const id = btn.dataset.agentId;
+      if (!id || !confirm("Delete this saved agent run?")) return;
+      try {
+        await fetch(`/agent/${id}`, { method: "DELETE" });
+        const loadedId = (window.LOCALLLM && window.LOCALLLM.loadedAgent && window.LOCALLLM.loadedAgent.id) || "";
+        if (loadedId === id) {
+          window.location.href = "/agent";
+        } else {
+          btn.closest(".chat-row").remove();
+        }
+      } catch {}
+    });
+  }
+
   // Resume on reload: server passed an in-progress job, reattach the
   // SSE stream + repopulate the prompt textarea so the page mirrors
   // what was running before navigation.
   const activeJob = window.LOCALLLM && window.LOCALLLM.activeJob;
   if (activeJob && activeJob.job_id) {
+    if (activeJob.agent_id) currentAgentId = activeJob.agent_id;
     $promptInput.value = activeJob.prompt || "";
     if (activeJob.model) {
       const modelSelect = document.getElementById("agent-model");
@@ -224,5 +326,7 @@
     setStatus("resuming…", "");
     $runBtn.disabled = true;
     subscribe(activeJob.job_id);
+  } else if (loadedAgent) {
+    renderLoadedSession(loadedAgent);
   }
 })();

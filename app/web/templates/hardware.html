@@ -69,6 +69,38 @@
 
       <section class="message assistant" style="max-width:none;">
         <div class="message-header">
+          <span class="role">installed models</span>
+        </div>
+        <div class="content">
+          {% if installed_models %}
+            <ul class="model-list installed-model-list">
+              {% for m in installed_models %}
+                {% set model_name = m.name or m.model %}
+                <li class="model-row installed" data-model="{{ model_name }}">
+                  <span class="status-dot">✓</span>
+                  <code>{{ model_name }}</code>
+                  {% if m.size %}
+                    <span class="status-label model-size" data-bytes="{{ m.size }}">{{ m.size }} bytes</span>
+                  {% else %}
+                    <span class="status-label">installed</span>
+                  {% endif %}
+                  {% if m.modified_at %}
+                    <span class="status-label">{{ m.modified_at }}</span>
+                  {% endif %}
+                  <button type="button" class="btn ghost copy-model" data-model="{{ model_name }}">Copy</button>
+                  <button type="button" class="btn ghost delete-model" data-model="{{ model_name }}">Delete</button>
+                  <span class="delete-progress muted-note"></span>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p style="color:var(--muted);margin:0;">No installed models reported by Ollama.</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="message assistant" style="max-width:none;">
+        <div class="message-header">
           <span class="role">recommendation: {{ rec.tier }}</span>
         </div>
         <div class="content">
@@ -98,6 +130,28 @@
           {% endif %}
         </div>
       </section>
+
+      <section class="message assistant" style="max-width:none;">
+        <div class="message-header">
+          <span class="role">optional models</span>
+        </div>
+        <div class="content">
+          <ul class="model-list">
+            {% for m in optional_models %}
+              {% set s = optional_model_status[m] %}
+              <li class="model-row {{ s }}" data-model="{{ m }}">
+                <span class="status-dot">{{ "✓" if s == "installed" else "✗" }}</span>
+                <code>{{ m }}</code>
+                <span class="status-label">{{ s }}</span>
+                {% if s == "missing" %}
+                  <button type="button" class="btn primary pull-model" data-model="{{ m }}">⬇ Pull</button>
+                  <span class="pull-progress muted-note"></span>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </section>
     </div>
   </main>
 
@@ -113,6 +167,11 @@
       while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
       return `${n.toFixed(1)}${u[i]}`;
     }
+
+    document.querySelectorAll(".model-size").forEach((el) => {
+      const n = Number(el.dataset.bytes || 0);
+      if (n) el.textContent = fmtBytes(n);
+    });
 
     function attachPull(btn, jobId) {
       const row = btn.closest(".model-row");
@@ -184,6 +243,43 @@
         } catch (err) {
           btn.closest(".model-row").querySelector(".pull-progress").textContent =
             `❌ ${err}`;
+        }
+      });
+    });
+
+    document.querySelectorAll(".copy-model").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(btn.dataset.model || "");
+        btn.textContent = "Copied";
+        setTimeout(() => { btn.textContent = "Copy"; }, 1200);
+      });
+    });
+
+    document.querySelectorAll(".delete-model").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const model = btn.dataset.model;
+        if (!confirm(`Delete local Ollama model ${model}?`)) return;
+        const row = btn.closest(".model-row");
+        const progress = row.querySelector(".delete-progress");
+        btn.disabled = true;
+        progress.textContent = "Deleting…";
+        try {
+          const r = await fetch("/api/ollama/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model }),
+          });
+          if (!r.ok) {
+            const t = await r.text();
+            progress.textContent = `❌ ${r.status}: ${t}`;
+            btn.disabled = false;
+            return;
+          }
+          progress.textContent = "Deleted";
+          row.remove();
+        } catch (err) {
+          progress.textContent = `❌ ${err}`;
+          btn.disabled = false;
         }
       });
     });
