@@ -63,10 +63,10 @@
       </label>
       <label>
         Fallback writer (optional)
-        <select id="fallback-writer-model">
-          <option value="">(none)</option>
+        <select id="fallback-writer-model" data-loaded-value="{{ loaded.fallback_writer_model or '' }}">
+          <option value="" {% if not loaded or not loaded.fallback_writer_model %}selected{% endif %}>(none)</option>
           {% for m in model_options %}
-            <option value="{{ m }}">{{ m }}</option>
+            <option value="{{ m }}" {% if loaded and m == loaded.fallback_writer_model %}selected{% endif %}>{{ m }}</option>
           {% endfor %}
         </select>
         <span class="muted-note" style="font-size:0.7rem;">

@@ -89,9 +89,16 @@ def test_run_agent_returns_immediately_on_no_tool_calls() -> None:
     assert SYSTEM_PROMPT.strip() in sent["messages"][0]["content"]
     assert sent["messages"][1]["role"] == "user"
     assert sent["tools"] == TOOL_SCHEMAS
-    # Events: step_start, model_text, done
+    # Events: step_start, then done — the FINAL turn's text reaches
+    # the UI via done.metadata.answer, not via a separate model_text
+    # event. Emitting it as both produced the double-render bug
+    # (Reasoning panel + Final Answer panel showing the same paragraph).
     names = [n for n, _ in events]
-    assert names == ["step_start", "model_text", "done"]
+    assert names == ["step_start", "done"]
+    # Done event must carry the answer in metadata so the UI can
+    # render it.
+    done_events = [p for n, p in events if n == "done"]
+    assert done_events[0]["answer"] == "I already know the answer."
 
 
 def test_run_agent_executes_tool_then_returns_answer() -> None:
@@ -120,11 +127,12 @@ def test_run_agent_executes_tool_then_returns_answer() -> None:
         )
     assert "42" in answer
     names = [n for n, _ in events]
-    # Iteration 0: step_start, tool_call, tool_result. Iteration 1:
-    # step_start, model_text, then done.
+    # Iteration 0: step_start + tool_call + tool_result.
+    # Iteration 1: step_start + (NO model_text — that would double-
+    # render against done.metadata.answer) + done.
     assert names == [
         "step_start", "tool_call", "tool_result",
-        "step_start", "model_text", "done",
+        "step_start", "done",
     ]
     # The 'tool' message got appended for the next iteration
     second_call = client.calls[1]
@@ -403,3 +411,63 @@ def test_system_prompt_says_skip_stale_dont_fetch() -> None:
     # Reserve-budget rule: tool calls have a hard cap so we don't
     # exhaust budget on gathering and skip synthesis.
     assert "reserve" in p_low or "budget" in p_low
+
+
+# ---------------------------------------------------------------------------
+# Final-answer single-render — pin against the double-emit regression
+# ---------------------------------------------------------------------------
+
+def test_final_answer_text_not_emitted_as_model_text() -> None:
+    """Regression: the user's iOS-vulnerabilities run showed the same
+    paragraph rendered twice — once as 'Reasoning' (model_text) and
+    once as 'Final answer' (done.metadata.answer). The final turn's
+    text MUST flow through done only; never through a model_text
+    event that the UI would render alongside the final-answer panel."""
+    client = FakeChatClient([
+        # Single turn, no tools — text becomes final_answer directly.
+        {"role": "assistant", "content": "Done — answer is foo."},
+    ])
+    events: list[tuple[str, dict]] = []
+    run_agent(
+        "x",
+        chat_client=client,
+        model="granite",
+        on_event=lambda n, p: events.append((n, p)),
+    )
+    text_events = [p for n, p in events if n == "model_text"]
+    assert text_events == [], (
+        f"final-iteration text leaked into model_text events: {text_events}"
+    )
+    # And the answer reached the UI via done as expected.
+    done_events = [p for n, p in events if n == "done"]
+    assert done_events[0]["answer"] == "Done — answer is foo."
+
+
+def test_intermediate_reasoning_still_emits_model_text() -> None:
+    """Suppressing model_text on the FINAL turn must not also suppress
+    it on intermediate tool-calling turns — those are the model's
+    legitimate 'thinking out loud' that the user wants to see."""
+    client = FakeChatClient([
+        # Iter 0: reasoning + tool_call. Text here IS intermediate.
+        {
+            "role": "assistant",
+            "content": "I'll search for that.",
+            "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "x"}}}],
+        },
+        # Iter 1: final answer.
+        {"role": "assistant", "content": "Found it."},
+    ])
+    events: list[tuple[str, dict]] = []
+    with patch("app.agent.loop._execute_tool", return_value={"results": []}):
+        run_agent(
+            "x",
+            chat_client=client,
+            model="granite",
+            on_event=lambda n, p: events.append((n, p)),
+        )
+    text_events = [p["content"] for n, p in events if n == "model_text"]
+    assert "I'll search for that." in text_events, (
+        f"intermediate reasoning was suppressed; got: {text_events}"
+    )
+    # Final answer text must NOT also appear as model_text.
+    assert "Found it." not in text_events

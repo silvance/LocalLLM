@@ -250,6 +250,19 @@
     src.addEventListener("tool_result", (e) => renderAgentEvent("tool_result", JSON.parse(e.data)));
     src.addEventListener("tool_error", (e) => renderAgentEvent("tool_error", JSON.parse(e.data)));
 
+    // Centralized cleanup so EVERY exit path (clean done, server-side
+    // error, network drop) leaves the input unlocked. Previously the
+    // button was unlocked only inside the `done` handler — if the SSE
+    // connection died or never received `done`, the input stayed
+    // permanently disabled and the user couldn't re-submit. Reported
+    // as "I still cannot respond to the online agent."
+    function finishStream() {
+      try { src.close(); } catch (_) {}
+      activeSource = null;
+      activeJobId = null;
+      $runBtn.disabled = false;
+    }
+
     src.addEventListener("error", (e) => {
       try {
         renderAgentEvent("error", JSON.parse(e.data));
@@ -273,14 +286,35 @@
         }
         setStatus(`done (${status})`, "");
       } finally {
-        src.close();
-        activeSource = null;
-        activeJobId = null;
-        $runBtn.disabled = false;
+        finishStream();
       }
     });
 
-    src.onerror = () => console.warn("EventSource error; will retry");
+    // Browser-level connection error (network drop, server crash, etc.)
+    // — EventSource auto-reconnects by default, but if the job is
+    // already gone server-side, the reconnect loop never recovers.
+    // Surface a banner AND unlock the input after a short grace
+    // period so the operator isn't trapped.
+    let errorRecoveryTimer = null;
+    src.onerror = () => {
+      console.warn("EventSource error; will retry");
+      // Browser fires onerror for both transient blips AND permanent
+      // close. Give it ~3s to reconnect; if it can't, treat as done
+      // and unlock the UI.
+      if (errorRecoveryTimer) return;
+      errorRecoveryTimer = setTimeout(() => {
+        errorRecoveryTimer = null;
+        if (src.readyState === EventSource.CLOSED || src.readyState === EventSource.CONNECTING) {
+          appendEvent(
+            "error", "Connection lost",
+            '<span class="muted-note">SSE stream did not recover. ' +
+            'You can re-submit your prompt.</span>',
+          );
+          setStatus("disconnected", "");
+          finishStream();
+        }
+      }, 3000);
+    };
   }
 
   $runBtn.addEventListener("click", startAgent);

@@ -58,6 +58,52 @@ def test_no_blocks_returns_empty() -> None:
     assert extract_python_blocks("just prose, no fences") == []
 
 
+def test_extracts_block_with_indented_fence() -> None:
+    """Regression: deepseek-coder-v2 emits ``` ```python `` (one space
+    before the fence) consistently. The original regex anchored the
+    fence at column 0 with no allowance, so every response from that
+    model failed candidate_count with `no_candidate` and the review
+    loop spun until rounds expired. CommonMark allows up to 3 spaces
+    of leading indent on a fence; we now match that."""
+    text = (
+        "Here you go:\n\n"
+        " ```python\n"
+        "import subprocess\n"
+        "def main():\n    pass\n"
+        " ```\n"
+    )
+    blocks = extract_python_blocks(text)
+    assert len(blocks) == 1
+    assert "import subprocess" in blocks[0]
+
+
+def test_extracts_block_with_three_space_indent() -> None:
+    """Three spaces of leading indent is the CommonMark cutoff;
+    must still match. Four+ spaces would be an indented code block
+    in markdown (no fence) — out of scope for this gate."""
+    text = "Output:\n\n   ```python\nx = 1\n   ```\n"
+    blocks = extract_python_blocks(text)
+    assert blocks == ["x = 1\n"]
+
+
+def test_indented_fence_does_not_break_bash_filter() -> None:
+    """Allowing leading whitespace on the fence must NOT regress the
+    bash-block protection. An indented bash fence must still be
+    rejected the same way an unindented one is."""
+    text = (
+        " ```bash\n"
+        "pip install scapy\n"
+        " ```\n"
+        " ```python\n"
+        "def f(): pass\n"
+        " ```\n"
+    )
+    blocks = extract_python_blocks(text)
+    assert len(blocks) == 1
+    assert "def f" in blocks[0]
+    assert "pip install" not in blocks[0]
+
+
 # ---------------------- parseable_prefix -------------------------------
 
 def test_parseable_prefix_returns_full_when_complete() -> None:

@@ -238,6 +238,15 @@ button {
   /* Centered conversation column; the parent .chat owns the scroll
      so the scrollbar sits at the chat-column edge (with breathing
      room from the right-aligned user bubble) instead of right next
+     to the bubble where the column ends.
+
+     max-width tuned for code-heavy chats: long file paths, traceback
+     lines, and pasted snippets read poorly when wrapped at ~75 chars.
+     80rem (~1280px) gives ~140 chars of code while still keeping
+     reasonable margins on 2k/4k monitors — the previous 60rem cap
+     left ~800px of empty gutter on each side at 2541px wide. */
+  flex: 1;
+  min-height: 0;
      to the bubble where the column ends. */
   /* Grow to fill short chats, but do not shrink below the natural
      height of long chats. When this was `flex: 1`, tall assistant
@@ -248,7 +257,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  max-width: 60rem;
+  max-width: 80rem;
   width: 100%;
   margin: 0 auto;
 }
@@ -532,6 +541,13 @@ button {
      stays in view while the user scrolls history. */
   position: sticky;
   bottom: 0;
+  /* Match the .messages column so the input lines up with the
+     conversation above it instead of stretching full-width and
+     creating an asymmetric layout. */
+  max-width: 80rem;
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
 }
 .composer textarea {
   flex: 1;

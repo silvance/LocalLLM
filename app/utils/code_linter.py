@@ -32,8 +32,14 @@ from pyflakes import checker as _flakes_checker
 # "Python block." Rather than accept that risk, require explicit
 # python/py and anchor to start-of-line so accidental triple-backticks
 # inside code (rare) can't confuse us.
+#
+# Up to 3 leading spaces / tabs are allowed before the fence — this
+# matches CommonMark's indented-code-fence rule, which several models
+# (notably deepseek-coder-v2) emit consistently. Without it, every
+# response from those models trips the candidate_count gate with
+# `no_candidate` and the loop spins until rounds expire.
 _FENCE_PY = re.compile(
-    r"^```(?:python|py)\s*\r?\n([\s\S]*?)^```\s*$",
+    r"^[ \t]{0,3}```(?:python|py)\s*\r?\n([\s\S]*?)^[ \t]{0,3}```\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
