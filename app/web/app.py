@@ -686,10 +686,28 @@ async def review_load_page(review_id: str, request: Request):
 
 def _find_active_review_id() -> Optional[str]:
     """Most-recent review whose job is still streaming. Returns the
-    review_id (which doubles as a route key) so /review can redirect."""
+    review_id (which doubles as a route key) so /review can redirect.
+
+    Skips jobs whose stop has been requested but whose runner thread
+    hasn't yet flipped the status off "streaming" — there's a timing
+    window between DELETE-triggered stop and the runner noticing,
+    during which we'd otherwise redirect to a review_id whose
+    storage row was just deleted (404 loop the user reported)."""
     candidates = [
         j for j in job_manager.list_with_chat_prefix("review-")
         if j.status in ("pending", "streaming")
+        and not job_manager.is_stop_requested(j.id)
+    ]
+    if not candidates:
+        return None
+    # Belt-and-suspenders: even if a runner thread didn't pick up the
+    # stop yet, /review must not redirect to a review_id whose
+    # storage row no longer exists. Dead rows mean a deleted review
+    # — skip those candidates.
+    candidates = [
+        j for j in candidates
+        if review_storage.load(str(j.request_data.get("review_id") or ""))
+        is not None
     ]
     if not candidates:
         return None
@@ -733,6 +751,17 @@ def _render_review_page(request: Request, loaded, active_job_id=None) -> HTMLRes
 
 @app.delete("/review/{review_id}")
 async def delete_review(review_id: str) -> JSONResponse:
+    # Cancel any in-flight job for this review BEFORE removing the
+    # storage row — otherwise the job keeps streaming with status
+    # "streaming" and request_data.review_id pointing to a row that
+    # no longer exists. _find_active_review_id() then finds that
+    # orphan and /review redirects to /review/<deleted-id>, which
+    # 404s. The user sees an infinite redirect-to-404 loop and the
+    # only escape is waiting for the job to finish on its own (or
+    # restarting the server). User reported this exact pattern
+    # after stopping a review mid-run.
+    for job in job_manager.jobs_active_for_chat(f"review-{review_id}"):
+        job_manager.request_stop(job.id)
     review_storage.delete(review_id)
     return JSONResponse({"ok": True})
 

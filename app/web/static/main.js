@@ -239,6 +239,11 @@
   }
 
   function appendMessage(role, content) {
+    // First message in a fresh chat: drop the centered empty-state
+    // welcome so the conversation flows from the top instead of
+    // showing the welcome text shoved up against the new bubble.
+    const welcome = $messages.querySelector(".empty-welcome");
+    if (welcome) welcome.remove();
     const el = buildMessageElement(role, content);
     $messages.appendChild(el);
     scrollToBottom();

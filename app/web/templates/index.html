@@ -96,6 +96,12 @@
   <main class="chat">
     {% include "_ollama_banner.html" %}
     <div id="messages" class="messages">
+      {% if not chat.messages %}
+        <div class="empty-welcome">
+          <h2>What can I help you with?</h2>
+          <p>Ask a question, paste code, or describe a security or coding task.</p>
+        </div>
+      {% endif %}
       {% for msg in chat.messages %}
         <div class="message {{ msg.role }}" data-role="{{ msg.role }}">
           <div class="message-header">

@@ -87,6 +87,64 @@ def test_review_no_redirect_when_no_in_flight(client: TestClient) -> None:
     assert "null" in r.text  # the tojson serialization of None
 
 
+def test_review_delete_does_not_leave_404_redirect_loop(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """User reported: stop a review mid-stream and the URL keeps
+    404'ing. Root cause: DELETE removed the storage row but left
+    the runner job in status='streaming' with request_data pointing
+    at the deleted ID. _find_active_review_id() then returned that
+    orphan id and /review redirected back to /review/<deleted-id>,
+    which 404'd. Loop until the user gives up.
+
+    Regression guard: after DELETE, /review must serve the empty
+    form (200) — NOT a redirect to the deleted detail page."""
+    import threading
+    from app.web import app as web_app
+
+    # Spawn the "running review" on a daemon thread so the POST
+    # returns immediately — the orphan-job state we're testing is
+    # what the production runner thread leaves behind, not the
+    # synchronous call. Using time.sleep(60) inline here would make
+    # the test itself take 60s.
+    def _hang(*_args, **_kwargs):
+        threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
+    monkeypatch.setattr(web_app, "_start_review_thread", _hang)
+
+    r = client.post("/api/review", json={
+        "prompt": "delete-loop probe",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "rounds": 2,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    # Pre-delete: /review should redirect to the in-flight detail.
+    r_pre = client.get("/review", follow_redirects=False)
+    assert r_pre.status_code in (302, 303)
+    assert r_pre.headers["location"].endswith(f"/review/{review_id}")
+
+    # User clicks the trash icon → DELETE.
+    r_del = client.delete(f"/review/{review_id}")
+    assert r_del.status_code == 200
+
+    # Post-delete: /review must NOT redirect to /review/<deleted-id>.
+    # It should either serve the empty form (200) or, if the runner
+    # somehow leaks another in-flight review, redirect somewhere else.
+    r_post = client.get("/review", follow_redirects=False)
+    if r_post.status_code in (302, 303):
+        assert not r_post.headers["location"].endswith(
+            f"/review/{review_id}"
+        ), "redirected back to the deleted review's URL — 404 loop"
+    else:
+        assert r_post.status_code == 200
+
+    # And the deleted detail page itself returns 404 (storage row gone).
+    r_detail = client.get(f"/review/{review_id}")
+    assert r_detail.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Static-analysis gates fence the reviewer from broken code
 # ---------------------------------------------------------------------------
