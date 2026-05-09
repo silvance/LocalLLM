@@ -131,3 +131,118 @@ def test_pull_emits_pull_event_through_sse(
             if "event: done" in line or len(events) > 8:
                 break
     assert "pull_event" in events
+
+
+# ---------------------------------------------------------------------------
+# Installed-models discovery — handles every ollama-python return shape
+# ---------------------------------------------------------------------------
+
+def test_parse_ollama_list_dict_with_name() -> None:
+    """Older ollama-python returned a plain dict with `name` keys."""
+    from app.web.app import _parse_ollama_list_response
+    resp = {"models": [{"name": "qwen3-coder:30b"}, {"name": "granite4"}]}
+    assert _parse_ollama_list_response(resp) == ["qwen3-coder:30b", "granite4"]
+
+
+def test_parse_ollama_list_dict_with_model_key() -> None:
+    """Some versions use `model` instead of `name`."""
+    from app.web.app import _parse_ollama_list_response
+    resp = {"models": [{"model": "deepseek-coder-v2:latest"}]}
+    assert _parse_ollama_list_response(resp) == ["deepseek-coder-v2:latest"]
+
+
+def test_parse_ollama_list_pydantic_objects() -> None:
+    """Newer ollama-python (0.6.x) returns SubscriptableBaseModel objects.
+    The parser must read `.model` / `.name` attributes when subscript
+    access doesn't yield a hit."""
+    class _FakeEntry:
+        def __init__(self, name):
+            self.model = name
+    class _FakeResp:
+        def __init__(self):
+            self.models = [_FakeEntry("qwen2.5-coder:32b"), _FakeEntry("devstral:latest")]
+    from app.web.app import _parse_ollama_list_response
+    out = _parse_ollama_list_response(_FakeResp())
+    assert out == ["qwen2.5-coder:32b", "devstral:latest"]
+
+
+def test_parse_ollama_list_handles_empty_and_garbage() -> None:
+    from app.web.app import _parse_ollama_list_response
+    assert _parse_ollama_list_response(None) == []
+    assert _parse_ollama_list_response({}) == []
+    assert _parse_ollama_list_response({"models": []}) == []
+    # Malformed — no name / model field at all.
+    assert _parse_ollama_list_response({"models": [{"size": 123}]}) == []
+
+
+def test_installed_models_caches_within_ttl(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Page renders shouldn't hit Ollama once per nav. Second call
+    within TTL must reuse the cached list."""
+    from app.web import app as web_app
+
+    web_app._invalidate_installed_models_cache()
+    call_count = {"n": 0}
+
+    def _fake_list():
+        call_count["n"] += 1
+        return {"models": [{"name": "qwen3-coder:30b"}]}
+
+    monkeypatch.setattr(
+        web_app.chat_service.adapters["granite"].client, "list", _fake_list,
+    )
+    web_app._ollama_installed_models()
+    web_app._ollama_installed_models()
+    web_app._ollama_installed_models()
+    assert call_count["n"] == 1, "expected the cached list to be reused"
+
+
+def test_installed_models_invalidate_after_successful_pull(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """The pull completion path must drop the cache so the freshly
+    pulled model shows up on the next page render."""
+    from app.web import app as web_app
+
+    web_app._invalidate_installed_models_cache()
+    monkeypatch.setattr(
+        web_app.chat_service.adapters["granite"].client,
+        "list",
+        lambda: {"models": [{"name": "granite4"}]},
+    )
+    web_app._ollama_installed_models()  # populates cache
+    assert web_app._installed_models_cache is not None
+
+    web_app._invalidate_installed_models_cache()
+    assert web_app._installed_models_cache is None
+
+
+def test_installed_models_falls_back_to_http_when_client_throws(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """If ollama-python raises (API drift, version skew), we fall back
+    to the direct /api/tags call. The dropdown stays populated."""
+    from app.web import app as web_app
+
+    # Make the python-client path raise.
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated client failure")
+    monkeypatch.setattr(web_app.chat_service.adapters["granite"].client, "list", _boom)
+
+    # Make the HTTP fallback succeed.
+    monkeypatch.setattr(
+        "app.web.app.installed_names",
+        lambda base_url: ["qwen2.5-coder:32b", "deepseek-coder-v2:latest"],
+        raising=False,
+    )
+    # Need to patch where it's imported — _ollama_installed_models does
+    # `from app.services.ollama_models import installed_names`.
+    monkeypatch.setattr(
+        "app.services.ollama_models.installed_names",
+        lambda base_url: ["qwen2.5-coder:32b", "deepseek-coder-v2:latest"],
+    )
+
+    out = web_app._ollama_installed_models()
+    assert "qwen2.5-coder:32b" in out
+    assert "deepseek-coder-v2:latest" in out
