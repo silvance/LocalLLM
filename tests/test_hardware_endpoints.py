@@ -190,7 +190,7 @@ def test_ollama_status_reflects_unreachable_daemon(
         lambda: (_ for _ in ()).throw(ConnectionRefusedError("simulated refuse")),
     )
     monkeypatch.setattr(
-        "app.services.ollama_models.installed_names",
+        "app.services.ollama_models.installed_names_or_raise",
         lambda url: (_ for _ in ()).throw(ConnectionRefusedError("WinError 10061")),
     )
     web_app._ollama_installed_models()
@@ -237,7 +237,7 @@ def test_chat_page_renders_ollama_banner_when_unreachable(
         lambda: (_ for _ in ()).throw(ConnectionRefusedError("refused")),
     )
     monkeypatch.setattr(
-        "app.services.ollama_models.installed_names",
+        "app.services.ollama_models.installed_names_or_raise",
         lambda url: (_ for _ in ()).throw(ConnectionRefusedError("refused")),
     )
 
@@ -325,7 +325,7 @@ def test_installed_models_auto_retries_127_when_localhost_fails(
         return ["qwen3-coder:30b", "deepseek-coder-v2:latest"]
 
     monkeypatch.setattr(
-        "app.services.ollama_models.installed_names", _fake_installed,
+        "app.services.ollama_models.installed_names_or_raise", _fake_installed,
     )
 
     out = web_app._ollama_installed_models()
@@ -356,7 +356,7 @@ def test_installed_models_falls_back_to_http_when_client_throws(
     # Need to patch where it's imported — _ollama_installed_models does
     # `from app.services.ollama_models import installed_names`.
     monkeypatch.setattr(
-        "app.services.ollama_models.installed_names",
+        "app.services.ollama_models.installed_names_or_raise",
         lambda base_url: ["qwen2.5-coder:32b", "deepseek-coder-v2:latest"],
     )
 

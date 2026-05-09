@@ -1409,8 +1409,10 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
 
     # Path 2 — direct HTTP. Doesn't share the python client's response
     # parsing, so it survives ollama-python API changes between
-    # versions we haven't pinned to.
-    from app.services.ollama_models import installed_names
+    # versions we haven't pinned to. Use the raising variant so the
+    # real error propagates to the UI banner instead of being
+    # swallowed into "daemon reachable but empty".
+    from app.services.ollama_models import installed_names_or_raise
     candidate_urls = [base_url]
     # Windows defaults `localhost` to ::1 first, but Ollama only binds
     # IPv4. If the operator's .env still has `localhost`, the python
@@ -1424,7 +1426,7 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
     for url in candidate_urls:
         tried_urls.append(f"{url} (HTTP)")
         try:
-            names = installed_names(url)
+            names = installed_names_or_raise(url)
             if names:
                 if url != base_url:
                     logger.warning(
@@ -1436,6 +1438,7 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
                 break
         except Exception as exc:
             last_err = exc
+            logger.warning("ollama list (%s) failed: %s", url, exc)
             continue
 
     reachable = bool(names)

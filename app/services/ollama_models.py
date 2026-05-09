@@ -58,21 +58,50 @@ def _http_url(base_url: str, path: str) -> str:
 
 def list_installed(base_url: str) -> list[dict]:
     """GET /api/tags. Returns the daemon's view of installed models —
-    full entries (name, size, digest) so callers can show metadata."""
-    url = _http_url(base_url, "/api/tags")
+    full entries (name, size, digest) so callers can show metadata.
+
+    Returns ``[]`` on failure so legacy callers don't have to wrap.
+    Use ``list_installed_or_raise`` instead if you need to distinguish
+    "daemon reachable but empty" from "couldn't reach daemon."
+    """
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        return list_installed_or_raise(base_url)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         logger.warning("ollama list_installed failed: %s", exc)
         return []
+
+
+def list_installed_or_raise(base_url: str) -> list[dict]:
+    """Same as ``list_installed`` but propagates errors so the caller
+    can distinguish unreachable from empty. Used by the model-list
+    discovery path that needs to populate the UI's reachability
+    banner with a real error message."""
+    url = _http_url(base_url, "/api/tags")
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
     return list(data.get("models") or [])
 
 
 def installed_names(base_url: str) -> list[str]:
-    """Just the model name strings — what the hardware page displays."""
+    """Just the model name strings — what the hardware page displays.
+
+    Returns ``[]`` on failure (delegates to swallowing
+    ``list_installed``). For UI status that needs to know WHY the
+    list was empty, call ``installed_names_or_raise``.
+    """
     out: list[str] = []
     for entry in list_installed(base_url):
+        n = entry.get("name") or entry.get("model")
+        if n:
+            out.append(n)
+    return out
+
+
+def installed_names_or_raise(base_url: str) -> list[str]:
+    """``installed_names`` that propagates network errors. Use this
+    when the caller needs to surface the actual error to the user."""
+    out: list[str] = []
+    for entry in list_installed_or_raise(base_url):
         n = entry.get("name") or entry.get("model")
         if n:
             out.append(n)
