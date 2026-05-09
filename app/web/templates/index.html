@@ -94,6 +94,7 @@
   </aside>
 
   <main class="chat">
+    {% include "_ollama_banner.html" %}
     <div id="messages" class="messages">
       {% for msg in chat.messages %}
         <div class="message {{ msg.role }}" data-role="{{ msg.role }}">

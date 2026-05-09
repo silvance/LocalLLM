@@ -99,6 +99,7 @@
   </aside>
 
   <main class="chat">
+    {% include "_ollama_banner.html" %}
     <div class="review-prompt">
       <label for="review-prompt-input">Initial prompt {% if loaded %}<span style="color:var(--muted);font-weight:normal;">(read-only — start a new review to edit)</span>{% endif %}</label>
       <textarea

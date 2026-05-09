@@ -73,7 +73,7 @@ def _find_active_agent_job() -> Optional[dict]:
 async def agent_page(request: Request):
     # Match the chat/review/compare dropdown behaviour: list every
     # installed Ollama model, not just the three preset slots.
-    from app.web.app import _model_choices
+    from app.web.app import _model_choices, get_ollama_status
     return agent_templates.TemplateResponse(
         request,
         "agent.html",
@@ -82,6 +82,7 @@ async def agent_page(request: Request):
             "model_options": _model_choices(include_auto=False),
             "missing_deps": _missing_agent_deps(),
             "active_job": _find_active_agent_job(),
+            "ollama_status": get_ollama_status(),
         },
     )
 

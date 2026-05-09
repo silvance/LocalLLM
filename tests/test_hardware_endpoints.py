@@ -175,6 +175,80 @@ def test_parse_ollama_list_handles_empty_and_garbage() -> None:
     assert _parse_ollama_list_response({"models": [{"size": 123}]}) == []
 
 
+def test_ollama_status_reflects_unreachable_daemon(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """When neither path resolves the model list, get_ollama_status()
+    must report reachable=False with the configured URL and the
+    actual error message, so the UI banner can show 'Last error: X'."""
+    from app.web import app as web_app
+
+    web_app._invalidate_installed_models_cache()
+    monkeypatch.setattr(
+        web_app.chat_service.adapters["granite"].client,
+        "list",
+        lambda: (_ for _ in ()).throw(ConnectionRefusedError("simulated refuse")),
+    )
+    monkeypatch.setattr(
+        "app.services.ollama_models.installed_names",
+        lambda url: (_ for _ in ()).throw(ConnectionRefusedError("WinError 10061")),
+    )
+    web_app._ollama_installed_models()
+    status = web_app.get_ollama_status()
+    assert status["reachable"] is False
+    assert status["error"]
+    assert "WinError" in status["error"] or "refuse" in status["error"]
+    assert status["configured_url"]
+    # Must list every URL we tried so the banner can show the path.
+    assert any("HTTP" in u for u in status["tried_urls"])
+
+
+def test_ollama_status_reflects_reachable_daemon(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Happy path: status.reachable=True, error is None."""
+    from app.web import app as web_app
+
+    web_app._invalidate_installed_models_cache()
+    monkeypatch.setattr(
+        web_app.chat_service.adapters["granite"].client,
+        "list",
+        lambda: {"models": [{"name": "qwen3-coder:30b"}]},
+    )
+    web_app._ollama_installed_models()
+    status = web_app.get_ollama_status()
+    assert status["reachable"] is True
+    assert status["error"] is None
+    assert status["model_count"] == 1
+
+
+def test_chat_page_renders_ollama_banner_when_unreachable(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """End-to-end-ish: with the daemon unreachable, /chats/<id> embeds
+    the banner markup so the operator sees a clear failure mode + fix
+    rather than a silently-empty dropdown."""
+    from app.web import app as web_app
+
+    web_app._invalidate_installed_models_cache()
+    monkeypatch.setattr(
+        web_app.chat_service.adapters["granite"].client,
+        "list",
+        lambda: (_ for _ in ()).throw(ConnectionRefusedError("refused")),
+    )
+    monkeypatch.setattr(
+        "app.services.ollama_models.installed_names",
+        lambda url: (_ for _ in ()).throw(ConnectionRefusedError("refused")),
+    )
+
+    r = client.post("/chats", follow_redirects=False)
+    chat_url = r.headers["location"]
+    page = client.get(chat_url)
+    assert page.status_code == 200
+    assert "Ollama unreachable" in page.text
+    assert "OLLAMA_HOST" in page.text
+
+
 def test_installed_models_caches_within_ttl(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:
