@@ -1455,7 +1455,14 @@ class _StopRequested(Exception):
 # endpoint invalidates explicitly on success so the new model shows
 # up immediately.
 _installed_models_cache: "tuple[float, list[str]] | None" = None
-_INSTALLED_MODELS_TTL_S = 30.0
+# Successful probe results stay cached for 30s — page nav round-trips
+# would otherwise hit /api/tags every render (the 5-10s lag bug). On
+# FAILURE we cache for only 2s so a transient hiccup at startup (Ollama
+# slow to bind, IPv6 timing, etc.) doesn't keep the unreachable banner
+# stuck for half a minute after the daemon recovers. 2s is enough to
+# debounce a hot reload loop without the user noticing.
+_INSTALLED_MODELS_SUCCESS_TTL_S = 30.0
+_INSTALLED_MODELS_FAILURE_TTL_S = 2.0
 # Last-known reachability state — populated alongside the model list
 # so templates can render a "can't reach Ollama" banner without
 # duplicating the discovery logic.
@@ -1507,7 +1514,15 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
     snapshot = _installed_models_cache
     if not force_refresh and snapshot is not None:
         ts, cached = snapshot
-        if time.monotonic() - ts < _INSTALLED_MODELS_TTL_S:
+        # Empty list means the previous probe failed — retry sooner so
+        # the unreachable banner clears as soon as Ollama is back. A
+        # populated list is a successful probe; cache it for the full
+        # TTL because re-probing on every page render is expensive.
+        ttl = (
+            _INSTALLED_MODELS_SUCCESS_TTL_S if cached
+            else _INSTALLED_MODELS_FAILURE_TTL_S
+        )
+        if time.monotonic() - ts < ttl:
             return cached
 
     base_url = chat_service.settings.ollama_host or "http://127.0.0.1:11434"
