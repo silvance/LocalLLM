@@ -507,11 +507,95 @@ def test_max_unique_builders_caps_chain(
     )
 
 
-def test_review_aborts_on_repeated_blocker(
+def test_review_routes_to_reviewer_when_only_known_dep_missing(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:
-    """Same blocker text appearing in two reviewer rounds means we're
-    stuck — abort instead of burning more rounds."""
+    """Writer code uses scapy (a real third-party package) but scapy
+    isn't installed in the gate env. The orchestrator must:
+      1. NOT bump writer_static_fails (the writer didn't hallucinate),
+      2. emit a `dependency_blocked` section, and
+      3. still call the reviewer (with a gate-note prepended).
+    """
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    # Force scapy + scapy.layers.bluetooth4LE to look uninstalled
+    # regardless of whether the dev box has them.
+    import importlib.util
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *a, **kw):
+        if name == "scapy":
+            return None
+        return real_find_spec(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+
+    writer_code = (
+        "Here you go:\n\n"
+        "```python\n"
+        "import scapy\n"
+        "from scapy.layers.bluetooth4LE import BTLE_ADV\n"
+        "def cap_ble():\n"
+        "    return scapy, BTLE_ADV\n"
+        "```\n"
+    )
+    review_text = "Architecture looks fine; assuming scapy is installed it works."
+    calls = _stub_chat_service(
+        monkeypatch,
+        scripted_outputs=[writer_code, review_text],
+    )
+
+    r = client.post("/api/review", json={
+        "prompt": "BLE sniffer",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        # rounds=2 means: writer round 0 + gate_or_review round 1.
+        # No revise loop, so the 2 scripted outputs (writer + reviewer)
+        # are exactly enough.
+        "rounds": 2,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 8.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    roles = [s.role for s in saved.sections]
+    assert "dependency_blocked" in roles, (
+        f"no dependency_blocked section emitted; roles: {roles}"
+    )
+    assert "gates" not in roles, (
+        f"writer was incorrectly bounced to gates path; roles: {roles}"
+    )
+    assert "reviewer" in roles, (
+        f"reviewer should still run on dependency-blocked code; roles: {roles}"
+    )
+
+    # Reviewer prompt must include the GATE NOTE so the reviewer
+    # doesn't reject the code as "uses an unavailable package".
+    reviewer_calls = [c for c in calls if c["selection"] == "gemma"]
+    assert reviewer_calls, "reviewer was never called"
+    reviewer_prompt = "\n".join(m.content for m in reviewer_calls[0]["messages"])
+    assert "GATE NOTE" in reviewer_prompt
+    assert "scapy" in reviewer_prompt
+
+
+def test_review_repeated_blocker_triggers_constrained_kickoff(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Same blocker text appearing twice → orchestrator escalates to a
+    constrained-architecture-template rebuild BEFORE aborting. This is
+    the one-shot escalation path: abort only fires if the same blocker
+    survives the constrained round too."""
     from app.web import app as web_app
     from app.utils.review_storage import ReviewStorage
 
@@ -524,10 +608,17 @@ def test_review_aborts_on_repeated_blocker(
         '"safe_to_rebuild": true, "recommended_next_action": "rebuild_same_writer"}\n```'
     )
     clean2 = "```python\ndef sniff_ble2():\n    pass\n```\n"
-    same_blocker_again = blocker_review  # identical blocker text
+    same_blocker_again = blocker_review  # threshold hits → constrained kickoff
+    constrained_writer = "```python\ndef sniff_ble3():\n    pass\n```\n"
+    post_constrained_review = (
+        "Still wrong.\n\n```json\n"
+        '{"pass": false, "blockers": ["BLE cannot be sniffed from wlan0"], '
+        '"safe_to_rebuild": true, "recommended_next_action": "rebuild_same_writer"}\n```'
+    )
     extra = "```python\npass\n```\n"
     calls = _stub_chat_service(monkeypatch, scripted_outputs=[
-        clean1, blocker_review, clean2, same_blocker_again, extra,
+        clean1, blocker_review, clean2, same_blocker_again,
+        constrained_writer, post_constrained_review, extra,
     ])
 
     r = client.post("/api/review", json={
@@ -548,14 +639,42 @@ def test_review_aborts_on_repeated_blocker(
         time.sleep(0.05)
     assert saved is not None and saved.status == "done"
 
-    # An orchestrator-notice section should announce the abort.
+    # The constrained-kickoff section MUST be emitted between the
+    # second blocker reveal and the abort.
+    constrained_sections = [s for s in saved.sections if s.role == "constrained_kickoff"]
+    assert constrained_sections, (
+        f"no constrained_kickoff section; sections: "
+        f"{[(s.role, s.text[:60]) for s in saved.sections]}"
+    )
+    assert any(
+        "constrained" in s.text.lower() or "escalation" in s.text.lower()
+        for s in constrained_sections
+    )
+
+    # The constrained writer round must have been called with the
+    # architecture-template prompt — visible in the stubbed call log
+    # via the user message text.
+    constrained_calls = [
+        c for c in calls
+        if any(
+            "ESCALATION" in m.content or "HARD CONSTRAINTS" in m.content
+            for m in c["messages"]
+        )
+    ]
+    assert constrained_calls, "constrained-kickoff prompt never reached the writer"
+
+    # And after the constrained round still fails, the abort notice
+    # must fire — that's the final stop, not just the escalation.
     fallback_sections = [s for s in saved.sections if s.role == "fallback"]
     assert any(
         "stopping:" in s.text.lower()
-        or "same blocker" in s.text.lower()
+        or "constrained" in s.text.lower()
         or "abort" in s.text.lower()
         for s in fallback_sections
-    ), f"no abort notice; fallback sections: {[s.text for s in fallback_sections]}"
+    ), (
+        f"no abort notice after constrained round; "
+        f"fallback sections: {[s.text for s in fallback_sections]}"
+    )
 
 
 def test_review_runs_reviewer_when_gates_pass(

@@ -65,7 +65,8 @@ def test_append_creates_parent_dir(tmp_path: Path) -> None:
 
 def test_event_types_match_documented_enum() -> None:
     assert EVENT_TYPES == {
-        "gate_pass", "gate_fail", "review_pass", "review_block", "abort",
+        "gate_pass", "gate_fail", "gate_blocked",
+        "review_pass", "review_block", "abort",
     }
 
 

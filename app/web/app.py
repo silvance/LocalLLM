@@ -71,7 +71,9 @@ from app.utils.comparison_storage import (
     new_run as new_comparison_run,
 )
 from app.services.review_gates import (
+    all_blocked_only as gates_all_blocked_only,
     all_passed as gates_all_passed,
+    format_blocked_for_reviewer as gates_format_blocked_for_reviewer,
     format_for_writer as gates_format_for_writer,
     gate_candidate_count,
     run_gates,
@@ -886,6 +888,20 @@ def _start_review_thread(
         # prompt can list every static issue the previous writer kept
         # tripping on — not just the latest one.
         gate_failure_history: list[str] = []
+        # Blocker text we've seen repeat past MAX_SAME_BLOCKER_REPEATS.
+        # Used to build a constrained-kickoff prompt that explicitly
+        # forbids those failure modes — the next writer round becomes
+        # an architecture-template rebuild rather than a generic patch.
+        repeated_blockers: list[str] = []
+        # When set, the next writer round should use the constrained-
+        # kickoff prompt (one-shot escalation before abort). Cleared
+        # after use so subsequent rounds revert to the usual templates.
+        constrained_kickoff_pending = False
+        # True once we've already burned the constrained-kickoff
+        # round. If the same blocker shows up AGAIN after the
+        # constrained rebuild, the orchestrator aborts — there's no
+        # third option left.
+        constrained_kickoff_used = False
 
         def run_section(*, role: str, model: str, messages: list[ChatMessage]) -> str:
             """Stream one role's response and capture its text. Returns the
@@ -983,7 +999,7 @@ def _start_review_thread(
             blockers; track each blocker's text frequency and abort
             the loop if any text repeats >= MAX_SAME_BLOCKER_REPEATS.
             """
-            nonlocal abort_reason
+            nonlocal abort_reason, constrained_kickoff_pending
             prompt_h = hash_prompt(prompt)
             # Gate 0: candidate_count runs on the FULL writer response
             # so its failure message can talk about fence syntax. If
@@ -1007,12 +1023,22 @@ def _start_review_thread(
             blocks = extract_python_blocks(writer_text)
             code = "\n\n".join(blocks)
             results = run_gates(code) if code else []
-            if results and not gates_all_passed(results):
+
+            # Three buckets:
+            #   1. Terminal failure → writer's fault; bounce back without
+            #      reviewer, bump writer_static_fails.
+            #   2. Blocked-only (e.g. real third-party deps not installed
+            #      in gate env) → NOT writer's fault; emit dependency-
+            #      blocked notice, run reviewer with a note, do NOT bump
+            #      counters and do NOT add to gate_failure_history.
+            #   3. All passed → run reviewer normally.
+            if results and not gates_all_passed(results) and not gates_all_blocked_only(results):
+                # Bucket 1.
                 writer_static_fails[active_writer] = writer_static_fails.get(active_writer, 0) + 1
                 feedback = gates_format_for_writer(results)
                 gate_failure_history.append(feedback)
                 _emit_inline_section("gates", "(static analysis)", feedback)
-                first_fail = next((r for r in results if not r.passed), None)
+                first_fail = next((r for r in results if r.is_terminal_failure), None)
                 outcomes_log.append(
                     review_id=review_id, writer=active_writer,
                     event="gate_fail",
@@ -1021,16 +1047,37 @@ def _start_review_thread(
                 )
                 return
 
-            # All gates passed — log it before invoking the reviewer
-            # so the model-stats CLI can compute a clean pass rate.
-            outcomes_log.append(
-                review_id=review_id, writer=active_writer,
-                event="gate_pass", prompt_hash=prompt_h,
-            )
+            blocked_note = ""
+            if results and gates_all_blocked_only(results):
+                # Bucket 2: dependency-blocked. Emit a friendly notice
+                # and feed the reviewer a note so it doesn't reject the
+                # code as "uses fake imports".
+                blocked_note = gates_format_blocked_for_reviewer(results)
+                ui_text = (
+                    "Static-analysis gates found that this code uses real "
+                    "third-party packages that aren't installed in the "
+                    "local gate environment. Treating those as available "
+                    "and routing to the reviewer for an architecture / "
+                    "correctness pass — the writer is NOT being asked to "
+                    "rewrite this round.\n\n"
+                    f"{blocked_note}"
+                )
+                _emit_inline_section("dependency_blocked", "(static analysis)", ui_text)
+                outcomes_log.append(
+                    review_id=review_id, writer=active_writer,
+                    event="gate_blocked", prompt_hash=prompt_h,
+                )
+            else:
+                # Bucket 3: all passed.
+                outcomes_log.append(
+                    review_id=review_id, writer=active_writer,
+                    event="gate_pass", prompt_hash=prompt_h,
+                )
 
             review_user = (
                 f"{REVIEWER_INSTRUCTION}\n\n{REVIEWER_VERDICT_SCHEMA}\n\n"
-                f"---\n\nOriginal task:\n{prompt}\n\n"
+                + (f"{blocked_note}\n\n" if blocked_note else "")
+                + f"---\n\nOriginal task:\n{prompt}\n\n"
                 f"---\n\nCode under review:\n\n{writer_text}"
             )
             msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
@@ -1040,22 +1087,35 @@ def _start_review_thread(
             # Domain-failure tracking. Any blockers from the reviewer
             # count as a domain failure for the current writer.
             if verdict.blockers:
+                nonlocal_constrained_pending = False
                 writer_domain_fails[active_writer] = (
                     writer_domain_fails.get(active_writer, 0) + 1
                 )
                 # Repeat tracking is per UNIQUE blocker, regardless of
                 # which writer round produced it — same conceptual bug
-                # surfacing twice means we're stuck.
+                # surfacing twice means generic rebuilds aren't working.
                 for b in verdict.blockers:
                     key = _normalize_blocker(b)
                     if not key:
                         continue
                     blocker_counts[key] = blocker_counts.get(key, 0) + 1
-                    if blocker_counts[key] >= MAX_SAME_BLOCKER_REPEATS and abort_reason is None:
-                        abort_reason = (
-                            f"Same blocker reported {blocker_counts[key]} times: "
-                            f"{b[:120]!r}"
-                        )
+                    if blocker_counts[key] >= MAX_SAME_BLOCKER_REPEATS:
+                        if b not in repeated_blockers:
+                            repeated_blockers.append(b)
+                        # First time we hit the threshold: escalate to
+                        # the constrained-kickoff path (one architecture-
+                        # template rebuild). Second time (i.e. blocker
+                        # ALSO survives the constrained round): abort.
+                        if constrained_kickoff_used and abort_reason is None:
+                            abort_reason = (
+                                f"Same blocker survived a constrained-architecture "
+                                f"rebuild. Reported {blocker_counts[key]} times: "
+                                f"{b[:120]!r}"
+                            )
+                        else:
+                            nonlocal_constrained_pending = True
+                if nonlocal_constrained_pending and not constrained_kickoff_used:
+                    constrained_kickoff_pending = True
 
             # Persist the cleaned prose (JSON block stripped) for the
             # human-facing review log; the verdict object is kept on the
@@ -1160,6 +1220,59 @@ def _start_review_thread(
                 f"---\n\nReviewer's notes:\n\n{feedback_section['text']}"
             )
 
+        def constrained_kickoff_message() -> str:
+            """One-shot architecture-template rebuild prompt. Lists every
+            reviewer blocker that's repeated past threshold as a hard
+            MUST NOT, plus structural constraints aimed at the BLE/Wi-Fi
+            failure modes that motivated this escalation: separate
+            backends per protocol, no Scapy on Wi-Fi monitor ifaces for
+            BLE, BLE via BlueZ tooling instead of pyshark/tshark.
+
+            Why a separate prompt instead of just appending the blockers
+            to the regular revise template: the writer keeps "fixing"
+            the SAME bug because the regular revise prompt frames the
+            existing code as the starting point. The constrained kickoff
+            forbids the broken pattern explicitly and makes the writer
+            re-architect from a hard-rule template."""
+            joined = "\n".join(f"- {b}" for b in repeated_blockers[-6:]) or "- (none recorded)"
+            return (
+                f"ESCALATION: the same critical reviewer blocker has now "
+                f"appeared in {MAX_SAME_BLOCKER_REPEATS}+ separate rounds, "
+                f"so generic rebuilds are not working. This is your one "
+                f"chance to re-architect from scratch under hard "
+                f"constraints. Read the rules below carefully — the next "
+                f"reviewer pass will fail this code automatically if it "
+                f"violates any of them.\n\n"
+                f"Original user request:\n{prompt}\n\n"
+                f"HARD CONSTRAINTS — repeated reviewer blockers, MUST NOT "
+                f"recur:\n{joined}\n\n"
+                f"STRUCTURAL CONSTRAINTS:\n"
+                f"- If the task involves BOTH Wi-Fi and BLE: implement "
+                f"each protocol in a SEPARATE function / class / module. "
+                f"Do not share an interface, capture loop, or sniff() "
+                f"call across protocols.\n"
+                f"- BLE capture MUST use BlueZ tooling (`btmon`, "
+                f"`bluetoothctl --monitor`, mgmt-API, or "
+                f"`socket.AF_BLUETOOTH` HCI raw socket). Do NOT route "
+                f"BLE through `scapy.sniff()` or "
+                f"`pyshark.LiveCapture(interface=\"hci0\")` — "
+                f"neither path works on stock Linux without out-of-tree "
+                f"setup.\n"
+                f"- Wi-Fi capture goes on a monitor-mode 802.11 "
+                f"interface (`wlan0mon` / `mon0`) via "
+                f"`scapy.sniff(iface=...)`. NEVER pass a wlan/mon "
+                f"interface to a function that decodes BLE layers.\n"
+                f"- Real third-party deps (scapy, pyshark, bleak, "
+                f"bluetooth/pybluez) are FINE — assume they are "
+                f"installed. Do not invent module names.\n\n"
+                f"OUTPUT FORMAT:\n"
+                f"- Return EXACTLY ONE fenced ```python ... ``` block.\n"
+                f"- No prose, no shell snippets outside the block.\n"
+                f"- Code must parse and import cleanly.\n\n"
+                f"Now produce a fresh implementation under those rules. "
+                f"Start from scratch — do NOT patch the previous code."
+            )
+
         def fallback_kickoff_message(primary_name: str) -> str:
             """First prompt the fallback writer sees. Fresh-start
             framing: don't show the broken code (model would just
@@ -1250,10 +1363,26 @@ def _start_review_thread(
                         # Last slot was a `gates` fail — try the static
                         # threshold instead.
                         maybe_swap_writer()
-                    # Pick the prompt: fresh-start kickoff if we just
-                    # engaged the fallback (don't show it the broken
-                    # code), otherwise the regular revise template.
-                    if fallback_kickoff_pending:
+                    # Prompt priority for the next writer round:
+                    #   1. constrained_kickoff_pending — repeated-blocker
+                    #      escalation, takes precedence over everything
+                    #      else (one-shot architecture-template rebuild).
+                    #   2. fallback_kickoff_pending — fresh-start prompt
+                    #      for a newly-swapped fallback writer.
+                    #   3. regular revise template.
+                    if constrained_kickoff_pending:
+                        revise_user = constrained_kickoff_message()
+                        constrained_kickoff_pending = False
+                        constrained_kickoff_used = True
+                        _emit_inline_section(
+                            "constrained_kickoff", "(orchestrator)",
+                            "Repeated reviewer blocker hit the escalation "
+                            "threshold. Switching to a constrained "
+                            "architecture-template rebuild for this round. "
+                            "If the same blocker recurs, the loop will abort.",
+                        )
+                        msgs = [ChatMessage(role="user", content=revise_user)]
+                    elif fallback_kickoff_pending:
                         revise_user = fallback_kickoff_message(writer_model)
                         fallback_kickoff_pending = False
                         # No base_messages() system prompt — the kickoff
@@ -1409,8 +1538,10 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
 
     # Path 2 — direct HTTP. Doesn't share the python client's response
     # parsing, so it survives ollama-python API changes between
-    # versions we haven't pinned to.
-    from app.services.ollama_models import installed_names
+    # versions we haven't pinned to. Use the raising variant so the
+    # real error propagates to the UI banner instead of being
+    # swallowed into "daemon reachable but empty".
+    from app.services.ollama_models import installed_names_or_raise
     candidate_urls = [base_url]
     # Windows defaults `localhost` to ::1 first, but Ollama only binds
     # IPv4. If the operator's .env still has `localhost`, the python
@@ -1424,7 +1555,7 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
     for url in candidate_urls:
         tried_urls.append(f"{url} (HTTP)")
         try:
-            names = installed_names(url)
+            names = installed_names_or_raise(url)
             if names:
                 if url != base_url:
                     logger.warning(
@@ -1436,6 +1567,7 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
                 break
         except Exception as exc:
             last_err = exc
+            logger.warning("ollama list (%s) failed: %s", url, exc)
             continue
 
     reachable = bool(names)
