@@ -218,6 +218,49 @@ def test_installed_models_invalidate_after_successful_pull(
     assert web_app._installed_models_cache is None
 
 
+def test_installed_models_auto_retries_127_when_localhost_fails(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Windows localhost trap: localhost resolves to ::1 on modern
+    Windows but Ollama only binds IPv4. If the configured host uses
+    `localhost` and the call refuses, we silently retry with
+    127.0.0.1 so the dropdown still works without forcing every
+    operator to update their .env."""
+    from app.web import app as web_app
+
+    web_app._invalidate_installed_models_cache()
+    web_app.chat_service.settings = web_app.chat_service.settings.__class__(
+        **{**web_app.chat_service.settings.__dict__,
+           "ollama_host": "http://localhost:11434"},
+    )
+
+    # Make the python client path fail (simulates the WinError 10061).
+    monkeypatch.setattr(
+        web_app.chat_service.adapters["granite"].client,
+        "list",
+        lambda: (_ for _ in ()).throw(ConnectionRefusedError("refused")),
+    )
+
+    calls: list[str] = []
+
+    def _fake_installed(base_url: str) -> list[str]:
+        calls.append(base_url)
+        if "localhost" in base_url:
+            raise ConnectionRefusedError("WinError 10061 stand-in")
+        # 127.0.0.1 path succeeds.
+        return ["qwen3-coder:30b", "deepseek-coder-v2:latest"]
+
+    monkeypatch.setattr(
+        "app.services.ollama_models.installed_names", _fake_installed,
+    )
+
+    out = web_app._ollama_installed_models()
+    assert out == ["qwen3-coder:30b", "deepseek-coder-v2:latest"]
+    # First attempt at localhost, then the auto-retry at 127.0.0.1.
+    assert any("localhost" in u for u in calls)
+    assert any("127.0.0.1" in u for u in calls)
+
+
 def test_installed_models_falls_back_to_http_when_client_throws(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:
