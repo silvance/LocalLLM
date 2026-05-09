@@ -6,12 +6,16 @@ import pytest
 
 from app.services.review_gates import (
     DEFAULT_GATES,
+    KNOWN_THIRD_PARTY_MODULES,
     GateResult,
+    all_blocked_only,
     all_passed,
+    format_blocked_for_reviewer,
     format_for_writer,
     gate_candidate_count,
     gate_imports,
     gate_lint,
+    gate_protocol_interface_mismatch,
     gate_smoke,
     gate_syntax,
     run_gates,
@@ -203,6 +207,273 @@ def test_gate_imports_silent_on_syntax_error() -> None:
     is the one that should report the failure (avoids double-noise)."""
     r = gate_imports("def foo(:\n")
     assert r.passed is True
+
+
+# ---------------------------------------------------------------------------
+# gate_imports — known-dep allowlist + taxonomy
+# ---------------------------------------------------------------------------
+
+def test_gate_imports_allowlist_lists_real_security_packages() -> None:
+    """Sanity-check that the allowlist contains the packages the
+    BLE/Wi-Fi sniffer task actually needs — if these regress, the
+    writer will start getting bounced for legitimate dependency
+    choices."""
+    for pkg in ("scapy", "pyshark", "bluetooth", "bleak", "numpy",
+                "requests", "fastapi", "pydantic", "cryptography"):
+        assert pkg in KNOWN_THIRD_PARTY_MODULES
+
+
+def test_gate_imports_marks_fake_module_as_likely_fake_import() -> None:
+    code = "import made_up_xyz_module_qqq\n"
+    r = gate_imports(code)
+    assert r.passed is False
+    assert r.blocked is False, "fake module is the writer's fault, not blocked"
+    assert r.failure_type == "likely_fake_import"
+    assert r.is_terminal_failure is True
+
+
+def test_gate_imports_marks_known_dep_as_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a real third-party package on the allowlist isn't installed
+    locally, the gate must mark it BLOCKED rather than failing the
+    writer for a hallucination they didn't commit."""
+    import importlib.util
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *a, **kw):
+        if name == "scapy":
+            return None
+        return real_find_spec(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    r = gate_imports("import scapy\n")
+    assert r.passed is False
+    assert r.blocked is True
+    assert r.failure_type == "missing_known_dependency"
+    assert r.is_terminal_failure is False, "blocked must NOT count as terminal"
+
+
+def test_gate_imports_mixed_fake_and_blocked_buckets_as_fake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a candidate has BOTH a fake import and a missing-but-real
+    dep, the result is `likely_fake_import` (writer's fault dominates).
+    The blocked entries are surfaced in the message list too so the
+    writer sees the full picture."""
+    import importlib.util
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *a, **kw):
+        if name in ("scapy", "totally_made_up_qzx"):
+            return None
+        return real_find_spec(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    code = "import scapy\nimport totally_made_up_qzx\n"
+    r = gate_imports(code)
+    assert r.passed is False
+    assert r.blocked is False
+    assert r.failure_type == "likely_fake_import"
+    joined = " ".join(r.messages)
+    assert "totally_made_up_qzx" in joined
+    assert "scapy" in joined  # surfaced too, in the trailing block
+
+
+def test_run_gates_continues_past_blocked_to_protocol_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gate_imports BLOCKED must NOT short-circuit the chain — the
+    static gates after it (protocol_interface_mismatch,
+    no_placeholder_impl) still need to run so the reviewer hears
+    about all of them at once."""
+    import importlib.util
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *a, **kw):
+        if name == "scapy":
+            return None
+        return real_find_spec(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    code = (
+        "from scapy.layers.bluetooth4LE import BTLE_ADV\n"
+        "from scapy.all import sniff\n"
+        "def capture_ble():\n"
+        "    return sniff(iface='wlan0mon', count=10), BTLE_ADV\n"
+    )
+    results = run_gates(code)
+    names = [r.name for r in results]
+    # Both blocked-import AND protocol_interface_mismatch must appear.
+    assert "import" in names
+    assert "protocol_interface_mismatch" in names
+    import_r = next(r for r in results if r.name == "import")
+    mismatch_r = next(r for r in results if r.name == "protocol_interface_mismatch")
+    assert import_r.blocked is True
+    assert mismatch_r.is_terminal_failure is True
+
+
+def test_run_gates_skips_smoke_when_known_dep_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke gate would just fail trying to import the missing dep —
+    skip it (as blocked) rather than reporting a noisy ImportError."""
+    monkeypatch.setenv("LOCALLLM_REVIEW_GATE_SMOKE_ENABLED", "1")
+    import importlib.util
+    real_find_spec = importlib.util.find_spec
+
+    def fake_find_spec(name: str, *a, **kw):
+        if name == "scapy":
+            return None
+        return real_find_spec(name, *a, **kw)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+    code = "import scapy\nprint(scapy)\n"
+    results = run_gates(code)
+    smoke_r = next(r for r in results if r.name == "smoke")
+    assert smoke_r.blocked is True
+    assert smoke_r.passed is False
+    assert "skipped" in smoke_r.messages[0].lower()
+
+
+def test_all_blocked_only_distinguishes_blocked_from_terminal() -> None:
+    blocked_only = [
+        GateResult("syntax", passed=True),
+        GateResult("import", passed=False, blocked=True,
+                   failure_type="missing_known_dependency"),
+    ]
+    assert all_blocked_only(blocked_only) is True
+
+    has_terminal = [
+        GateResult("syntax", passed=True),
+        GateResult("import", passed=False, blocked=True,
+                   failure_type="missing_known_dependency"),
+        GateResult("protocol_interface_mismatch", passed=False,
+                   failure_type="protocol_interface_mismatch"),
+    ]
+    assert all_blocked_only(has_terminal) is False
+
+    all_pass = [GateResult("syntax", passed=True), GateResult("lint", passed=True)]
+    assert all_blocked_only(all_pass) is False
+
+
+def test_format_blocked_for_reviewer_includes_known_deps() -> None:
+    blocked = [
+        GateResult(
+            "import", passed=False, blocked=True,
+            failure_type="missing_known_dependency",
+            messages=["'scapy' (top-level 'scapy') not installed in gate env"],
+        ),
+    ]
+    note = format_blocked_for_reviewer(blocked)
+    assert "GATE NOTE" in note
+    assert "scapy" in note
+    assert "treat them as installed" in note.lower()
+
+
+def test_format_for_writer_omits_blocked_results() -> None:
+    """Writer feedback must not include blocked entries — telling the
+    writer to "fix" a legitimate dep choice is the bug we're solving."""
+    results = [
+        GateResult("import", passed=False, blocked=True,
+                   failure_type="missing_known_dependency",
+                   messages=["'scapy' not installed locally"]),
+    ]
+    out = format_for_writer(results)
+    assert out == "", "blocked-only results should produce no writer feedback"
+
+
+# ---------------------------------------------------------------------------
+# gate_protocol_interface_mismatch
+# ---------------------------------------------------------------------------
+
+def test_protocol_mismatch_passes_on_clean_wifi_only_code() -> None:
+    code = (
+        "from scapy.all import sniff\n"
+        "def cap_wifi():\n"
+        "    return sniff(iface='wlan0mon', count=5)\n"
+    )
+    r = gate_protocol_interface_mismatch(code)
+    assert r.passed is True
+
+
+def test_protocol_mismatch_passes_on_clean_ble_only_code() -> None:
+    code = (
+        "from scapy.layers.bluetooth4LE import BTLE_ADV\n"
+        "import subprocess\n"
+        "def cap_ble():\n"
+        "    return subprocess.run(['btmon'], capture_output=True), BTLE_ADV\n"
+    )
+    r = gate_protocol_interface_mismatch(code)
+    assert r.passed is True
+
+
+def test_protocol_mismatch_flags_btle_with_wlan0mon() -> None:
+    code = (
+        "from scapy.layers.bluetooth4LE import BTLE_ADV\n"
+        "from scapy.all import sniff\n"
+        "def capture_ble():\n"
+        "    return sniff(iface='wlan0mon', count=10), BTLE_ADV\n"
+    )
+    r = gate_protocol_interface_mismatch(code)
+    assert r.passed is False
+    assert r.failure_type == "protocol_interface_mismatch"
+    assert any("protocol_interface_mismatch" in m for m in r.messages)
+    assert any("wlan0mon" in m for m in r.messages)
+
+
+def test_protocol_mismatch_flags_btle_with_mon0() -> None:
+    code = (
+        "from scapy.layers.bluetooth import BTLE_ADV\n"
+        "from scapy.all import sniff\n"
+        "sniff(iface=\"mon0\", count=1)\n"
+        "print(BTLE_ADV)\n"
+    )
+    r = gate_protocol_interface_mismatch(code)
+    assert r.passed is False
+    assert any("mon0" in m for m in r.messages)
+
+
+def test_protocol_mismatch_flags_pyshark_hci_capture() -> None:
+    code = (
+        "import pyshark\n"
+        "cap = pyshark.LiveCapture(interface='hci0')\n"
+        "for pkt in cap.sniff_continuously():\n"
+        "    print(pkt)\n"
+    )
+    r = gate_protocol_interface_mismatch(code)
+    assert r.passed is False
+    assert any("unverified_hci_capture_path" in m for m in r.messages)
+    assert any("hci0" in m for m in r.messages)
+
+
+def test_protocol_mismatch_does_not_flag_scapy_hci() -> None:
+    """Scapy on hci0 isn't *valid* either, but it's a different bucket
+    — this gate is specifically about the BLE-on-Wi-Fi-iface and
+    pyshark-on-HCI failure modes the reviewer keeps flagging."""
+    code = (
+        "from scapy.layers.bluetooth4LE import BTLE_ADV\n"
+        "from scapy.all import sniff\n"
+        "sniff(iface='hci0', count=1)\n"
+        "print(BTLE_ADV)\n"
+    )
+    r = gate_protocol_interface_mismatch(code)
+    assert r.passed is True
+
+
+def test_protocol_mismatch_in_default_chain() -> None:
+    assert gate_protocol_interface_mismatch in DEFAULT_GATES
+    # Must run AFTER imports (the BLE indicator strings come from
+    # imports) and BEFORE smoke (so the static signal is captured even
+    # if smoke is disabled).
+    assert (
+        DEFAULT_GATES.index(gate_protocol_interface_mismatch)
+        > DEFAULT_GATES.index(gate_imports)
+    )
+    assert (
+        DEFAULT_GATES.index(gate_protocol_interface_mismatch)
+        < DEFAULT_GATES.index(gate_smoke)
+    )
 
 
 # ---------------------------------------------------------------------------

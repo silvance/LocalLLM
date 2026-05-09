@@ -45,10 +45,31 @@ class GateResult:
     name: str
     passed: bool
     messages: list[str] = field(default_factory=list)
+    # When True, the gate did NOT pass but the failure isn't the
+    # writer's fault — typical case: a real third-party dependency
+    # we recognize is missing from the local gate environment. The
+    # orchestrator runs the reviewer anyway (with a note) and does
+    # not bump writer_static_fails.
+    blocked: bool = False
+    # Taxonomy: free-form short string the orchestrator branches on.
+    # Examples:
+    #   - "likely_fake_import"          (writer hallucinated a module)
+    #   - "missing_known_dependency"    (real dep, not installed locally)
+    #   - "protocol_interface_mismatch" (BLE on Wi-Fi iface, etc.)
+    failure_type: str = ""
+
+    @property
+    def is_terminal_failure(self) -> bool:
+        """A failure that should bump writer counters and block the
+        reviewer. False if the result is `blocked` (environment / not-
+        the-writer's-fault)."""
+        return not self.passed and not self.blocked
 
     def summary_line(self) -> str:
         if self.passed:
-            return f"[OK] {self.name}"
+            return f"[ OK ] {self.name}"
+        if self.blocked:
+            return f"[BLOCKED] {self.name} ({len(self.messages)} issue{'s' if len(self.messages) != 1 else ''})"
         return f"[FAIL] {self.name} ({len(self.messages)} issue{'s' if len(self.messages) != 1 else ''})"
 
 
@@ -139,15 +160,81 @@ _STDLIB_MODULES: frozenset[str] = frozenset(
 )
 
 
+# Known third-party packages we treat as REAL even when missing locally.
+# When a module on this list isn't installed, the failure is an
+# environment problem (writer chose a legitimate package, gate env
+# doesn't have it), not a hallucination — the orchestrator marks the
+# round as "blocked" rather than failing the writer.
+#
+# Keep this conservative — false-allowlisting a fake module would
+# silently let hallucinated imports through. Each entry is a top-
+# level module name (what `import x` or `from x import y` evaluates,
+# i.e. the first dotted component).
+KNOWN_THIRD_PARTY_MODULES: frozenset[str] = frozenset({
+    # Networking / packet capture / RF — explicitly listed by the
+    # user because the BLE/Wi-Fi sniffer task keeps tripping over them.
+    "scapy",
+    "pyshark",
+    "bluetooth",       # PyBluez
+    "bleak",
+    "pybluez",
+    "bluepy",
+    "btlewrap",
+    "pcapy",
+    "pypcap",
+    "dpkt",
+    "netifaces",
+    "psutil",
+    # Common scientific stack — model often reaches for these.
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "sklearn",
+    # HTTP / web frameworks.
+    "requests",
+    "httpx",
+    "aiohttp",
+    "fastapi",
+    "starlette",
+    "uvicorn",
+    "flask",
+    "pydantic",
+    # Crypto / security forensics ecosystem.
+    "cryptography",
+    "nacl",
+    "paramiko",
+    "pyOpenSSL",
+    "OpenSSL",
+    # Misc heavy-hitters that show up in security/forensics code.
+    "yaml",
+    "lxml",
+    "bs4",
+    "PIL",
+    "cv2",
+    "serial",
+})
+
+
 def gate_imports(code: str) -> GateResult:
     """Gate 3: every module the code imports resolves on this Python.
 
     Static — uses ``importlib.util.find_spec`` on each top-level
     package referenced by ``import`` / ``from ... import``. No code
-    is executed; module-level statements stay frozen. Catches the
-    common LLM hallucination of inventing plausible-but-fake module
-    names (``import scapy_ng``, ``from cryptography.hazmat.primitives.ciphers
-    import Salsa42``).
+    is executed; module-level statements stay frozen.
+
+    Outcomes:
+      - All imports resolve → passed=True.
+      - At least one missing import is NOT in the known-third-party
+        allowlist → passed=False, failure_type="likely_fake_import".
+        The writer is at fault: it invented a module name. Real
+        missing-deps shown alongside, but the bucket is still
+        "fake" because we have to assume something's hallucinated.
+      - All missing imports are in the allowlist → passed=False,
+        blocked=True, failure_type="missing_known_dependency". The
+        writer picked legitimate packages; the gate env just doesn't
+        have them. The orchestrator routes to the reviewer with a
+        note instead of bouncing back to the writer.
     """
     try:
         tree = ast.parse(code)
@@ -165,7 +252,8 @@ def gate_imports(code: str) -> GateResult:
             if node.module:
                 imports.append(node.module)
 
-    failures: list[str] = []
+    fake_imports: list[str] = []
+    blocked_imports: list[str] = []
     seen: set[str] = set()
     for fullname in imports:
         top = fullname.split(".", 1)[0]
@@ -177,12 +265,59 @@ def gate_imports(code: str) -> GateResult:
         try:
             spec = importlib.util.find_spec(top)
         except (ImportError, ValueError) as exc:
-            failures.append(f"{fullname!r} not importable ({exc})")
+            # find_spec raised — treat top-level resolution as failed.
+            # Bucket the same way as spec-is-None.
+            if top in KNOWN_THIRD_PARTY_MODULES:
+                blocked_imports.append(
+                    f"{fullname!r} (top-level {top!r}) not installed in gate env "
+                    f"({exc}); recognized as a real third-party package"
+                )
+            else:
+                fake_imports.append(
+                    f"{fullname!r} not importable ({exc}); top-level "
+                    f"{top!r} is not on the known-dependency allowlist"
+                )
             continue
         if spec is None:
-            failures.append(f"{fullname!r} not found")
+            if top in KNOWN_THIRD_PARTY_MODULES:
+                blocked_imports.append(
+                    f"{fullname!r} (top-level {top!r}) not installed in gate env; "
+                    f"recognized as a real third-party package — install with "
+                    f"`pip install {top}` in the LocalLLM venv to enable smoke testing"
+                )
+            else:
+                fake_imports.append(
+                    f"{fullname!r} not found; top-level {top!r} is not on "
+                    f"the known-dependency allowlist — likely a hallucinated "
+                    f"or misspelled module name"
+                )
 
-    return GateResult("import", passed=not failures, messages=failures)
+    if not fake_imports and not blocked_imports:
+        return GateResult("import", passed=True)
+
+    if fake_imports:
+        # Any fake import dominates: the writer made something up.
+        # Surface blocked entries too so the writer sees the full
+        # picture, but the verdict is "fix your fake imports".
+        msgs = list(fake_imports)
+        if blocked_imports:
+            msgs.append("--- additionally, these real deps are missing locally ---")
+            msgs.extend(blocked_imports)
+        return GateResult(
+            "import",
+            passed=False,
+            messages=msgs,
+            failure_type="likely_fake_import",
+        )
+
+    # Only allowlisted modules missing → environment problem.
+    return GateResult(
+        "import",
+        passed=False,
+        messages=blocked_imports,
+        blocked=True,
+        failure_type="missing_known_dependency",
+    )
 
 
 def _smoke_enabled() -> bool:
@@ -368,6 +503,117 @@ def gate_no_placeholder_impl(code: str) -> GateResult:
     )
 
 
+# --- gate_protocol_interface_mismatch ------------------------------------
+
+
+# BLE Advertising channel constant from Scapy's BTLE module — when the
+# code references this, it's clearly building a BLE sniffer. Combine
+# with a Wi-Fi-style scapy.sniff() on a non-BLE iface and we have a
+# protocol/interface mismatch the reviewer keeps flagging.
+_BTLE_INDICATORS: tuple[str, ...] = (
+    "BTLE_ADV",
+    "BTLE_DATA",
+    "BTLE_RF",
+    "from scapy.layers.bluetooth",
+    "from scapy.layers.bluetooth4LE",
+)
+
+
+# Wi-Fi-style interface names the BLE branch should NEVER be sniffing
+# on. Substring match against the inside of an iface-string literal —
+# catches "wlan0", "wlan0mon", "mon0", "wlp3s0", "wlx0011…", and "wifi0"
+# regardless of any monitor-mode suffix.
+_WIFI_IFACE_RE = re.compile(
+    r"^(?:wlan\d|mon\d|wlp\d|wlx[0-9a-f]|wifi\d)",
+    re.IGNORECASE,
+)
+
+
+# scapy.sniff(iface=...) call — captures the iface argument string so we
+# can decide whether the sniff target is Wi-Fi-coded or BLE-coded.
+_SCAPY_SNIFF_RE = re.compile(
+    r"""(?:scapy\.)?sniff\s*\(\s*[^)]*?iface\s*=\s*(['"][^'"]+['"]|[A-Za-z_]\w*)""",
+    re.DOTALL,
+)
+
+
+# pyshark.LiveCapture(interface=...) where interface looks like an HCI
+# device. PyShark talks to tshark/Wireshark, which DOES NOT support
+# Bluetooth HCI capture out of the box on most platforms — surface this
+# as an "unverified path" rather than an outright fail since some
+# kernels do expose it via bluetooth-monitor.
+_PYSHARK_HCI_RE = re.compile(
+    r"""pyshark\.LiveCapture\s*\(\s*[^)]*?interface\s*=\s*['"](hci\d+)['"]""",
+    re.DOTALL,
+)
+
+
+def gate_protocol_interface_mismatch(code: str) -> GateResult:
+    """Static heuristic that catches two specific repeat-blocker
+    patterns the reviewer keeps flagging on BLE/Wi-Fi sniffer attempts:
+
+      1. ``BTLE_*`` / ``scapy.layers.bluetooth*`` referenced AND a
+         scapy ``sniff(iface=...)`` call points at a Wi-Fi-coded iface
+         (``wlan0``, ``mon0``, ...). Scapy can't pick BLE adverts off
+         a Wi-Fi monitor interface — wrong protocol stack entirely.
+
+      2. ``pyshark.LiveCapture(interface="hci0")`` (or any hciN). On
+         most stock distros tshark doesn't have a working bluetooth
+         capture path; the writer's almost certainly going to produce
+         empty captures or a permissions error.
+
+    Conservative on purpose. Doesn't try to validate iface names beyond
+    obvious Wi-Fi-pattern strings, doesn't fire on `iface="hci0"` for
+    scapy (that's a separate question), and doesn't try to introspect
+    function call graphs — just lexical co-occurrence.
+    """
+    findings: list[str] = []
+
+    has_btle = any(ind in code for ind in _BTLE_INDICATORS)
+    if has_btle:
+        for m in _SCAPY_SNIFF_RE.finditer(code):
+            iface_arg = m.group(1)
+            # Only catch literal-string ifaces; variables we can't
+            # statically resolve and shouldn't guess.
+            if not (iface_arg.startswith("'") or iface_arg.startswith('"')):
+                continue
+            iface_name = iface_arg.strip("'\"")
+            if _WIFI_IFACE_RE.match(iface_name):
+                line_no = code.count("\n", 0, m.start()) + 1
+                findings.append(
+                    f"line {line_no}: protocol_interface_mismatch — code "
+                    f"references BLE layers (BTLE_ADV / scapy.layers.bluetooth*) "
+                    f"but calls scapy.sniff(iface={iface_arg}) on a Wi-Fi-coded "
+                    f"interface. BLE advertisements live on a different radio "
+                    f"and don't appear in 802.11 capture; sniff BLE via "
+                    f"`btmon` / `bluetoothctl --monitor` or BlueZ HCI sockets, "
+                    f"and keep Wi-Fi capture in a separate function on its own "
+                    f"monitor-mode interface."
+                )
+
+    for m in _PYSHARK_HCI_RE.finditer(code):
+        line_no = code.count("\n", 0, m.start()) + 1
+        hci = m.group(1)
+        findings.append(
+            f"line {line_no}: unverified_hci_capture_path — "
+            f"pyshark.LiveCapture(interface={hci!r}) requires a tshark "
+            f"build with the bluetooth-monitor capture extcap installed, "
+            f"which is NOT present on stock Debian/Ubuntu/Raspbian. "
+            f"Use BlueZ tooling directly (`btmon`, mgmt-API, HCI raw "
+            f"socket via `socket.AF_BLUETOOTH`) instead — don't route BLE "
+            f"capture through the pyshark/tshark pipeline."
+        )
+
+    if not findings:
+        return GateResult("protocol_interface_mismatch", passed=True)
+    return GateResult(
+        "protocol_interface_mismatch",
+        passed=False,
+        messages=findings[:10],
+        failure_type="protocol_interface_mismatch",
+    )
+
+
 # --- Runner ---------------------------------------------------------------
 
 
@@ -378,6 +624,7 @@ DEFAULT_GATES: tuple[Callable[[str], GateResult], ...] = (
     gate_syntax,
     gate_lint,
     gate_imports,
+    gate_protocol_interface_mismatch,
     gate_no_placeholder_impl,
     gate_smoke,
 )
@@ -387,11 +634,28 @@ def run_gates(
     code: str,
     gates: Iterable[Callable[[str], GateResult]] | None = None,
 ) -> list[GateResult]:
-    """Run gates in order, stopping at the first failure. Returns the
-    completed-or-attempted results so the caller can see exactly which
-    gate the code died on."""
+    """Run gates in order. Short-circuit on the first TERMINAL failure
+    (writer's fault); keep going past BLOCKED results so we still
+    surface static issues like protocol_interface_mismatch alongside
+    dependency-environment notes.
+
+    The smoke gate is the one exception — it actually executes the
+    candidate, so it's skipped once any blocked-import has been seen
+    (running it would just fail trying to import the missing dep)."""
     out: list[GateResult] = []
+    seen_blocked = False
     for g in (gates or DEFAULT_GATES):
+        # Smoke gate would explode on blocked deps; treat as
+        # implicitly-blocked and don't actually run it.
+        if seen_blocked and getattr(g, "__name__", "") == "gate_smoke":
+            out.append(GateResult(
+                "smoke",
+                passed=False,
+                blocked=True,
+                failure_type="missing_known_dependency",
+                messages=["(skipped — depends on a known third-party package not installed locally)"],
+            ))
+            continue
         try:
             r = g(code)
         except Exception as exc:  # noqa: BLE001 — gates shouldn't crash, but be defensive
@@ -402,6 +666,9 @@ def run_gates(
                 messages=[f"gate crashed: {exc}"],
             )
         out.append(r)
+        if r.blocked:
+            seen_blocked = True
+            continue
         if not r.passed:
             break
     return out
@@ -414,8 +681,13 @@ def all_passed(results: list[GateResult]) -> bool:
 def format_for_writer(results: list[GateResult], max_msgs_per_gate: int = 25) -> str:
     """Format gate failures as a feedback string aimed at the writer
     model. Keeps the message count bounded so a noisy lint doesn't
-    explode the prompt."""
-    failed = [r for r in results if not r.passed]
+    explode the prompt.
+
+    Blocked results (e.g. missing_known_dependency) are NOT included
+    here — the orchestrator handles those on a separate path so the
+    writer isn't told to "fix" a legitimate dependency choice.
+    """
+    failed = [r for r in results if r.is_terminal_failure]
     if not failed:
         return ""
     lines = [
@@ -432,3 +704,37 @@ def format_for_writer(results: list[GateResult], max_msgs_per_gate: int = 25) ->
         if len(r.messages) > max_msgs_per_gate:
             lines.append(f"- … and {len(r.messages) - max_msgs_per_gate} more")
     return "\n".join(lines)
+
+
+def format_blocked_for_reviewer(results: list[GateResult]) -> str:
+    """Build a short note for the reviewer prompt explaining which
+    real third-party deps the gate env doesn't have. The reviewer
+    should treat them as available and review architecture/correctness
+    rather than reject the code for "won't run locally"."""
+    blocked = [r for r in results if r.blocked]
+    if not blocked:
+        return ""
+    lines = [
+        "GATE NOTE — the following imports could not be resolved in the "
+        "local gate environment but are recognized as real third-party "
+        "packages. Treat them as installed when reviewing; do NOT flag "
+        "them as fake or unavailable. Focus your review on architecture, "
+        "correctness, hardware/protocol grounding, and whether the code "
+        "would actually achieve the user's goal once the deps are present."
+    ]
+    for r in blocked:
+        for msg in r.messages[:25]:
+            lines.append(f"- {msg}")
+    return "\n".join(lines)
+
+
+def all_blocked_only(results: list[GateResult]) -> bool:
+    """True if at least one gate is blocked AND no gate is a terminal
+    failure. Used by the orchestrator to decide whether to take the
+    dependency-blocked path (run reviewer with a note, don't bump
+    writer counters)."""
+    if not results:
+        return False
+    has_blocked = any(r.blocked for r in results)
+    has_terminal = any(r.is_terminal_failure for r in results)
+    return has_blocked and not has_terminal

@@ -114,6 +114,27 @@
   border-color: rgba(210, 153, 34, 0.5);
   background: rgba(210, 153, 34, 0.05);
 }
+.review-section.role-dependency_blocked .role-label { color: #58a6ff; }
+.review-section.role-dependency_blocked {
+  /* Real third-party deps not installed in gate env. Info-blue tint
+     to distinguish from the red gates fail (writer's fault) and the
+     yellow fallback notice (orchestrator decision). */
+  border-color: rgba(88, 166, 255, 0.45);
+  background: rgba(88, 166, 255, 0.05);
+}
+.review-section.role-dependency_blocked .section-body {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+.review-section.role-constrained_kickoff .role-label { color: #d29922; }
+.review-section.role-constrained_kickoff {
+  /* Repeated-blocker escalation: orange-yellow + striped border to
+     visually mark this round as the "last chance under hard
+     constraints" rather than a routine fallback. */
+  border-color: rgba(210, 153, 34, 0.7);
+  background: rgba(210, 153, 34, 0.08);
+  border-style: dashed;
+}
 
 .review-section .section-body {
   padding: 0.75rem 1rem;

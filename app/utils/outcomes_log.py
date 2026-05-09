@@ -41,7 +41,12 @@ logger = logging.getLogger("localllm")
 # skipped during aggregation.
 EVENT_TYPES: frozenset[str] = frozenset({
     "gate_pass",       # all static gates passed for a writer round
-    "gate_fail",       # at least one static gate failed
+    "gate_fail",       # at least one static gate failed (writer's fault)
+    "gate_blocked",    # only-blocked failure — real third-party dep not
+                       # installed in gate env; NOT writer's fault, the
+                       # reviewer still ran. Counted separately so the
+                       # writer's gate_pass_rate isn't depressed by
+                       # operator environment quirks.
     "review_pass",     # reviewer returned no blockers
     "review_block",    # reviewer returned ≥1 blocker
     "abort",           # orchestrator stopped the run (blocker repeat etc.)
@@ -54,6 +59,7 @@ class ModelStats:
     runs: int = 0
     gate_passes: int = 0
     gate_fails: int = 0
+    gate_blocked: int = 0
     review_passes: int = 0
     review_blocks: int = 0
     aborts: int = 0
@@ -184,6 +190,8 @@ def aggregate_by_writer(entries: Iterator[dict]) -> dict[str, ModelStats]:
             s.gate_fails += 1
             gate = str(row.get("gate") or "unknown")
             s.gate_failure_counts[gate] = s.gate_failure_counts.get(gate, 0) + 1
+        elif event == "gate_blocked":
+            s.gate_blocked += 1
         elif event == "review_pass":
             s.review_passes += 1
         elif event == "review_block":
