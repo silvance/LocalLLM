@@ -1239,19 +1239,105 @@ class _StopRequested(Exception):
 # Hardware detection + model recommendation
 # ---------------------------------------------------------------------------
 
-def _ollama_installed_models() -> list[str]:
-    """Names of models present in the user's Ollama. Reuses the chat_service
-    client so we go through the same configured OLLAMA_HOST."""
+# Cached `ollama list` result. Every page render that hits a model
+# dropdown calls _ollama_installed_models(); without a cache that's a
+# fresh /api/tags HTTP round-trip per navigation, which Ollama can
+# take a noticeable fraction of a second to answer when 10+ models
+# are installed (the response includes metadata per model). 30 seconds
+# is plenty fresh for "did I just pull a model?" UX, and the pull
+# endpoint invalidates explicitly on success so the new model shows
+# up immediately.
+_installed_models_cache: "tuple[float, list[str]] | None" = None
+_INSTALLED_MODELS_TTL_S = 30.0
+
+
+def _invalidate_installed_models_cache() -> None:
+    """Drop the cached model list. Called after a successful pull so
+    the new model shows up in the next dropdown render without waiting
+    for the TTL to expire."""
+    global _installed_models_cache
+    _installed_models_cache = None
+
+
+def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
+    """Names of models present in the user's Ollama daemon.
+
+    Tries the ollama-python client first (reuses an already-open
+    connection). On any failure — daemon not running, API drift in the
+    pinned ollama package, surprise return type — falls back to a
+    direct HTTP call against /api/tags. Logs each step at WARN so a
+    silently-empty dropdown isn't a mystery: the operator can grep
+    ollama-localllm.log / uvicorn output to see what failed.
+
+    Cached with a short TTL so page-rendering hot paths don't hit the
+    daemon on every navigation (was the cause of 5-10s lag on /review
+    ↔ /chats round-trips).
+    """
+    import time
+    global _installed_models_cache
+    if not force_refresh and _installed_models_cache is not None:
+        ts, cached = _installed_models_cache
+        if time.monotonic() - ts < _INSTALLED_MODELS_TTL_S:
+            return cached
+
+    base_url = chat_service.settings.ollama_host or "http://127.0.0.1:11434"
+
+    # Path 1 — ollama-python client (existing path, fastest).
     try:
         resp = chat_service.adapters["granite"].client.list()
-    except Exception:
-        return []
-    names: list[str] = []
-    for entry in resp.get("models", []):
-        n = entry.get("name") or entry.get("model")
-        if n:
-            names.append(n)
+    except Exception as exc:
+        logger.warning(
+            "Ollama list via python client failed (%s); falling back to /api/tags HTTP",
+            exc,
+        )
+    else:
+        names = _parse_ollama_list_response(resp)
+        if names:
+            _installed_models_cache = (time.monotonic(), names)
+            return names
+        logger.warning(
+            "Ollama python client returned empty / unrecognised payload (%r); "
+            "falling back to /api/tags HTTP", type(resp).__name__,
+        )
+
+    # Path 2 — direct HTTP. Doesn't share the python client's response
+    # parsing, so it survives ollama-python API changes between
+    # versions we haven't pinned to.
+    from app.services.ollama_models import installed_names
+    try:
+        names = installed_names(base_url)
+    except Exception as exc:
+        logger.warning("Ollama list via /api/tags also failed: %s", exc)
+        names = []
+    if not names:
+        logger.warning(
+            "Ollama at %s returned no models — daemon running but empty?",
+            base_url,
+        )
+    _installed_models_cache = (time.monotonic(), names)
     return names
+
+
+def _parse_ollama_list_response(resp) -> list[str]:
+    """Pull model names out of whatever shape ``ollama.Client.list()``
+    returned. Ollama-python's return type changed from dict to a Pydantic
+    SubscriptableBaseModel between minor versions — handle both."""
+    # Dict-style (older) or SubscriptableBaseModel.get("models").
+    try:
+        models = resp.get("models", []) if hasattr(resp, "get") else getattr(resp, "models", [])
+    except Exception:
+        models = []
+    out: list[str] = []
+    for entry in models or []:
+        # Each entry might be a dict OR a Model object with .model / .name attrs.
+        name = None
+        if hasattr(entry, "get"):
+            name = entry.get("name") or entry.get("model")
+        if not name:
+            name = getattr(entry, "model", None) or getattr(entry, "name", None)
+        if name:
+            out.append(str(name))
+    return out
 
 
 def _model_choices(*, include_auto: bool = True) -> list[str]:
@@ -1589,6 +1675,11 @@ def _start_pull_thread(job: Job, model: str, loop: asyncio.AbstractEventLoop) ->
                 # frontend can render a progress bar from the
                 # `total` / `completed` fields without parsing prose.
                 job_manager.emit_event(job.id, "pull_event", event, loop)
+            # Force the dropdown cache to refresh on the next page
+            # render so the freshly-pulled model shows up immediately
+            # (without waiting for the TTL to expire).
+            if terminal_status == "done":
+                _invalidate_installed_models_cache()
             job_manager.finish(
                 job.id,
                 terminal_status,
