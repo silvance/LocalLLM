@@ -174,3 +174,21 @@ def pull_model(model: str, base_url: str) -> Iterator[dict]:
                 resp.close()
             except Exception:
                 pass
+
+
+def delete_model(model: str, base_url: str) -> None:
+    """DELETE /api/delete through the Ollama daemon.
+
+    Do not write into Ollama's model directory directly; the daemon owns
+    model layout and reference counting.
+    """
+    name = validate_model_name(model)
+    body = json.dumps({"name": name}).encode("utf-8")
+    req = urllib.request.Request(
+        _http_url(base_url, "/api/delete"),
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="DELETE",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        resp.read()

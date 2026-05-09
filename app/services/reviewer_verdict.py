@@ -45,6 +45,7 @@ VALID_ACTIONS: frozenset[str] = frozenset(
 class ReviewerVerdict:
     passed: bool
     blockers: list[str] = field(default_factory=list)
+    blocker_categories: list[str] = field(default_factory=list)
     safe_to_rebuild: bool = True
     next_action: NextAction = "rebuild_same_writer"
     raw_text: str = ""  # the full reviewer response, for the UI
@@ -67,6 +68,7 @@ After your prose review, append a SINGLE JSON object inside a fenced
 {
   "pass": false,
   "blockers": ["short summary of each issue, one per array entry"],
+  "blocker_categories": ["protocol_interface_mismatch"],
   "safe_to_rebuild": true,
   "recommended_next_action": "rebuild_same_writer"
 }
@@ -75,6 +77,11 @@ After your prose review, append a SINGLE JSON object inside a fenced
 Field rules:
 - `pass`: true only when there are NO blockers; false otherwise.
 - `blockers`: at most 8 short strings. Empty array if pass is true.
+- `blocker_categories`: optional normalized category strings. Prefer
+  protocol_interface_mismatch, fake_implementation,
+  missing_runtime_prereq_checks, unverified_api_usage,
+  hardware_requirement_omitted, unsafe_teardown, dependency_issue,
+  correctness_bug.
 - `safe_to_rebuild`: false only if the task is fundamentally
   impossible on the stated hardware/OS, otherwise true.
 - `recommended_next_action` MUST be one of:
@@ -162,6 +169,11 @@ def parse(text: str) -> ReviewerVerdict:
     passed = bool(data.get("pass", False))
     raw_blockers = data.get("blockers") or []
     blockers = [str(b) for b in raw_blockers if isinstance(b, str)]
+    raw_categories = data.get("blocker_categories") or data.get("categories") or []
+    categories = [str(c) for c in raw_categories if isinstance(c, str)]
+    if not categories:
+        categories = [_categorize_blocker(b) for b in blockers]
+    categories = list(dict.fromkeys(c for c in categories if c))
     safe = bool(data.get("safe_to_rebuild", True))
     action_raw = str(data.get("recommended_next_action") or "").strip()
     if action_raw not in VALID_ACTIONS:
@@ -183,7 +195,27 @@ def parse(text: str) -> ReviewerVerdict:
     return ReviewerVerdict(
         passed=passed,
         blockers=blockers,
+        blocker_categories=categories,
         safe_to_rebuild=safe,
         next_action=action_raw,  # type: ignore[arg-type]
         raw_text=text,
     )
+
+
+def _categorize_blocker(text: str) -> str:
+    t = text.casefold()
+    if any(x in t for x in ("wlan", "wi-fi", "wifi", "hci", "ble", "bluetooth", "protocol", "interface")):
+        return "protocol_interface_mismatch"
+    if any(x in t for x in ("simulated", "placeholder", "stub", "fake", "mock", "todo")):
+        return "fake_implementation"
+    if any(x in t for x in ("root", "cap_net", "permission", "privilege", "monitor mode", "service")):
+        return "missing_runtime_prereq_checks"
+    if any(x in t for x in ("hardware", "adapter", "dongle", "sniffer", "sdr", "device")):
+        return "hardware_requirement_omitted"
+    if any(x in t for x in ("teardown", "cleanup", "restore", "promiscuous")):
+        return "unsafe_teardown"
+    if any(x in t for x in ("import", "package", "dependency", "module")):
+        return "dependency_issue"
+    if any(x in t for x in ("api", "field", "attribute", "method", "unverified")):
+        return "unverified_api_usage"
+    return "correctness_bug"

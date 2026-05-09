@@ -122,6 +122,7 @@
       <div class="review-actions">
         <button type="button" id="run-review" class="btn primary" {% if loaded %}disabled{% endif %}>▶ Run review</button>
         <button type="button" id="stop-review" class="btn warn hidden">⏹ Stop</button>
+        <button type="button" id="copy-review-all" class="btn ghost">📋 Copy all</button>
         {% if loaded %}<span style="color:var(--muted);font-size:0.85rem;align-self:center;">Status: {{ loaded.status }}</span>{% endif %}
       </div>
     </div>
@@ -144,6 +145,7 @@
   <script>
     window.LOCALLLM = {
       activeJobId: {{ active_job_id|tojson if active_job_id else "null" }},
+      loadedReviewId: {{ loaded.id|tojson if loaded else "null" }},
     };
   </script>
   <script src="/static/sidebar.js"></script>

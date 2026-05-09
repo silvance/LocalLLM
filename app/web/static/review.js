@@ -5,6 +5,7 @@
   const $promptInput = document.getElementById("review-prompt-input");
   const $runBtn = document.getElementById("run-review");
   const $stopBtn = document.getElementById("stop-review");
+  const $copyAllBtn = document.getElementById("copy-review-all");
   const $stream = document.getElementById("review-stream");
 
   const $writerModel = document.getElementById("writer-model");
@@ -136,6 +137,68 @@
     btn.textContent = "✓ Copied";
     btn.classList.add("copied");
     setTimeout(() => { btn.textContent = o; btn.classList.remove("copied"); }, 1200);
+  }
+
+  function collectReviewDiagnostic() {
+    finalizePrevious();
+    const lines = [];
+    const loadedReviewId = window.LOCALLLM && window.LOCALLLM.loadedReviewId;
+    lines.push("# LocalLLM Review Diagnostic");
+    lines.push("");
+    lines.push(`Copied: ${new Date().toISOString()}`);
+    lines.push(`URL: ${window.location.href}`);
+    if (loadedReviewId) lines.push(`Saved review id: ${loadedReviewId}`);
+    if (activeJobId) lines.push(`Active job id: ${activeJobId}`);
+    lines.push("");
+    lines.push("## Request");
+    lines.push("");
+    lines.push(`Writer model: ${$writerModel.value || ""}`);
+    lines.push(`Reviewer model: ${$reviewerModel.value || ""}`);
+    lines.push(`Fallback writer: ${($fallbackWriterModel && $fallbackWriterModel.value) || "(none)"}`);
+    lines.push(`Rounds: ${$rounds.value || ""}`);
+    lines.push(`Apply prior lessons: ${$applyPriorLessons && $applyPriorLessons.checked ? "yes" : "no"}`);
+    lines.push(`Temperature: ${$temperature.value || ""}`);
+    lines.push(`Max tokens: ${$maxTokens.value || ""}`);
+    lines.push(`num_ctx: ${$numCtx.value || ""}`);
+    lines.push("");
+    lines.push("### System Prompt");
+    lines.push("");
+    lines.push(($systemPrompt.value || "").trim() || "(default)");
+    lines.push("");
+    lines.push("### User Prompt");
+    lines.push("");
+    lines.push(($promptInput.value || "").trim() || "(empty)");
+    lines.push("");
+    lines.push("## Review Sections");
+    lines.push("");
+
+    const sections = Array.from(document.querySelectorAll("#review-stream .review-section"));
+    if (!sections.length) {
+      lines.push("(no sections rendered)");
+      return lines.join("\n");
+    }
+
+    sections.forEach((sec, idx) => {
+      const body = sec.querySelector(".section-body");
+      const raw = (body && (body.dataset.raw || body.textContent)) || "";
+      const stats = sec.querySelector(".section-stats");
+      const lint = sec.querySelector(".lint-panel");
+      lines.push(`### ${idx + 1}. ${sec.dataset.role || "section"} · ${sec.dataset.model || ""}`);
+      if (stats && stats.textContent.trim()) {
+        lines.push(`Stats: ${stats.textContent.trim()}`);
+      }
+      if (lint && lint.textContent.trim()) {
+        lines.push("");
+        lines.push("Lint/Gate panel:");
+        lines.push(lint.textContent.trim());
+      }
+      lines.push("");
+      lines.push("```text");
+      lines.push(raw);
+      lines.push("```");
+      lines.push("");
+    });
+    return lines.join("\n");
   }
 
   // ---- Lint panel (live pyflakes findings keyed by section index) ----
@@ -510,6 +573,12 @@
     if (!activeJobId) return;
     await fetch(`/api/jobs/${activeJobId}/stop`, { method: "POST" });
   });
+  if ($copyAllBtn) {
+    $copyAllBtn.addEventListener("click", async () => {
+      const ok = await copyToClipboard(collectReviewDiagnostic());
+      if (ok) flashCopied($copyAllBtn);
+    });
+  }
 
   // Copy buttons (delegated). Buttons live inside <summary> elements
   // (the section is now a <details> for collapse), so any click that

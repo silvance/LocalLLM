@@ -25,13 +25,30 @@
       <a href="/hardware" class="btn ghost block" style="margin-top:0.4rem;text-align:center;text-decoration:none;">🖥 Hardware</a>
     </header>
 
+    <section class="sessions">
+      <a href="/agent" class="btn primary block">+ New agent run</a>
+      <ul class="chat-list">
+        {% for s in summaries %}
+          <li class="chat-row {% if loaded_agent and s.id == loaded_agent.id %}active{% endif %}">
+            <a href="/agent/{{ s.id }}" class="chat-link" title="{{ s.title }}">
+              {{ s.title }}
+              <span class="count">{{ s.status }}</span>
+            </a>
+            <button type="button" class="btn ghost del-agent"
+                    data-agent-id="{{ s.id }}" title="Delete this agent run">✕</button>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+
     <section class="settings">
       <h2>Agent settings</h2>
+      {% set selected_model = loaded_agent.model if loaded_agent else (active_job.model if active_job else "granite") %}
       <label>
         Model
         <select id="agent-model">
           {% for m in model_options %}
-            <option value="{{ m }}" {% if m == "granite" %}selected{% endif %}>{{ m }}</option>
+            <option value="{{ m }}" {% if m == selected_model %}selected{% endif %}>{{ m }}</option>
           {% endfor %}
         </select>
       </label>
@@ -79,10 +96,12 @@
       <textarea
         id="agent-prompt-input"
         rows="5"
-        placeholder="e.g. What's the current state of CVE-2024-XXXX, and which Linux distros have patched it?"></textarea>
+        placeholder="{% if loaded_agent %}Ask a follow-up in this saved agent session...{% else %}e.g. What's the current state of CVE-2024-XXXX, and which Linux distros have patched it?{% endif %}"></textarea>
       <div class="agent-actions">
         <button type="button" id="run-agent" class="btn primary"
-                {% if missing_deps %}disabled title="Install requirements-agent.txt first"{% endif %}>▶ Run</button>
+                {% if missing_deps %}disabled title="Install requirements-agent.txt first"{% endif %}>
+          {% if loaded_agent %}▶ Send follow-up{% else %}▶ Run{% endif %}
+        </button>
         <span id="agent-status" class="muted-note"></span>
       </div>
     </div>
@@ -93,6 +112,7 @@
   <script>
     window.LOCALLLM = {
       activeJob: {{ active_job|tojson if active_job else "null" }},
+      loadedAgent: {{ loaded_agent|tojson if loaded_agent else "null" }},
     };
   </script>
   <script src="/static/sidebar.js"></script>

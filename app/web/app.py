@@ -85,6 +85,7 @@ from app.services.continuity import (
     render_prior_lessons_for_writer,
     write_sitrep,
 )
+from app.services.domain_traps import builder_context, wrap_builder_prompt
 from app.utils.outcomes_log import OutcomeLog, default_log_path, hash_prompt
 from app.services.reviewer_verdict import (
     SCHEMA_INSTRUCTION as REVIEWER_VERDICT_SCHEMA,
@@ -822,6 +823,14 @@ MAX_SAME_WRITER_DOMAIN_FAILURES = 1      # reviewer-blocker rounds before swap
 MAX_UNIQUE_BUILDERS = 3                  # primary + ≤2 fallbacks total
 MAX_SAME_BLOCKER_REPEATS = 2             # same blocker text twice → abort
 _FALLBACK_WRITER_THRESHOLD = MAX_SAME_WRITER_STATIC_FAILURES  # legacy alias
+CRITICAL_BLOCKER_CATEGORIES: frozenset[str] = frozenset({
+    "protocol_interface_mismatch",
+    "fake_implementation",
+    "missing_runtime_prereq_checks",
+    "unverified_api_usage",
+    "hardware_requirement_omitted",
+    "unsafe_teardown",
+})
 
 
 def _serialize_sections(sections: list[dict]) -> list[dict]:
@@ -1017,6 +1026,27 @@ def _start_review_thread(
             dotted/dotless I) still match as the same blocker."""
             return " ".join(text.casefold().split())[:200]
 
+        def _blocker_tracking_keys(verdict: ReviewerVerdict) -> list[tuple[str, str]]:
+            """Return (key, display) pairs for repeated-blocker tracking.
+
+            Critical domain categories are tracked by category so small
+            wording changes ("BLE on wlan0" vs "Bluetooth via Wi-Fi")
+            still trigger escalation. Plain correctness blockers keep
+            the old normalized-text behavior to avoid over-escalating
+            unrelated small bugs.
+            """
+            out: list[tuple[str, str]] = []
+            categories = list(verdict.blocker_categories or [])
+            for idx, blocker in enumerate(verdict.blockers):
+                category = categories[idx] if idx < len(categories) else ""
+                if category in CRITICAL_BLOCKER_CATEGORIES:
+                    out.append((f"category:{category}", f"{category}: {blocker}"))
+                else:
+                    key = _normalize_blocker(blocker)
+                    if key:
+                        out.append((key, blocker))
+            return out
+
         def gate_or_review(writer_text: str) -> None:
             """Run static-analysis gates on the writer's latest output.
             On failure: emit a `gates` section, bump
@@ -1121,8 +1151,7 @@ def _start_review_thread(
                 # Repeat tracking is per UNIQUE blocker, regardless of
                 # which writer round produced it — same conceptual bug
                 # surfacing twice means generic rebuilds aren't working.
-                for b in verdict.blockers:
-                    key = _normalize_blocker(b)
+                for key, b in _blocker_tracking_keys(verdict):
                     if not key:
                         continue
                     blocker_counts[key] = blocker_counts.get(key, 0) + 1
@@ -1236,6 +1265,8 @@ def _start_review_thread(
             the previous slot was a reviewer (domain feedback) or a
             gates run (static-analysis feedback) — the writer needs
             different framing for each."""
+            trap_text = builder_context(prompt)
+            trap_block = f"\n\n---\n\nBuilder feasibility / trap constraints:\n{trap_text}" if trap_text else ""
             if feedback_section["role"] == "gates":
                 return (
                     f"Your previous code failed static-analysis gates. "
@@ -1245,11 +1276,13 @@ def _start_review_thread(
                     f"---\n\nOriginal task:\n{prompt}\n\n"
                     f"---\n\nGate failures:\n\n{feedback_section['text']}\n\n"
                     f"---\n\nYour previous code:\n\n{prev_writer_text}"
+                    f"{trap_block}"
                 )
             return (
                 f"{REVISE_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
                 f"---\n\nYour previous code:\n\n{prev_writer_text}\n\n"
                 f"---\n\nReviewer's notes:\n\n{feedback_section['text']}"
+                f"{trap_block}"
             )
 
         def constrained_kickoff_message() -> str:
@@ -1311,6 +1344,8 @@ def _start_review_thread(
             prose / setup blocks since those are what tripped the
             block extractor in the first place)."""
             joined = "\n\n".join(gate_failure_history[-3:]) or "(none recorded)"
+            trap_text = builder_context(prompt)
+            trap_block = f"\n\nBuilder feasibility / trap constraints:\n{trap_text}\n" if trap_text else ""
             primary_static = writer_static_fails.get(primary_name, 0)
             primary_domain = writer_domain_fails.get(primary_name, 0)
             return (
@@ -1330,6 +1365,7 @@ def _start_review_thread(
                 f"without `import threading`, etc.).\n\n"
                 f"Static failures the previous builder kept producing — "
                 f"avoid all of these:\n\n{joined}\n\n"
+                f"{trap_block}"
                 f"Now produce a fresh implementation. Start from "
                 f"scratch — do NOT patch the previous code; the "
                 f"approach was wrong."
@@ -1395,9 +1431,10 @@ def _start_review_thread(
                         "prior_lessons", "(continuity)", prior_lessons_text,
                     )
 
+            trapped_prompt = wrap_builder_prompt(prompt)
             writer_user_content = (
-                f"{prior_lessons_text}\n\n---\n\n{prompt}"
-                if prior_lessons_text else prompt
+                f"{prior_lessons_text}\n\n---\n\n{trapped_prompt}"
+                if prior_lessons_text else trapped_prompt
             )
             writer_msgs = base_messages() + [ChatMessage(role="user", content=writer_user_content)]
             writer_text = run_section(role="writer", model=active_writer, messages=writer_msgs)
@@ -2015,13 +2052,48 @@ async def save_compare(request: Request) -> JSONResponse:
 async def hardware_page(request: Request):
     hw = detect_hardware()
     rec = recommend_models(hw)
-    payload = hw_to_dict(hw, rec, installed=_ollama_installed_models())
+    base_url = chat_service.settings.ollama_host or "http://127.0.0.1:11434"
+    installed_names = _ollama_installed_models()
+    try:
+        from app.services.ollama_models import list_installed
+        installed_models = list_installed(base_url)
+    except Exception:
+        logger.exception("Failed to load installed model metadata")
+        installed_models = []
+    if not installed_models and installed_names:
+        installed_models = [{"name": name} for name in installed_names]
+    optional_models = [
+        "devstral:latest",
+        "deepseek-coder-v2:latest",
+        "qwen2.5-coder:32b",
+        "qwq:latest",
+        "nomic-embed-text",
+    ]
+    installed_set = set(installed_names)
+
+    def _status_for_model(model: str) -> str:
+        if model in installed_set:
+            return "installed"
+        if ":" in model:
+            base = model.split(":", 1)[0]
+            if base in installed_set or any(name.startswith(base + ":") for name in installed_set):
+                return "installed"
+        elif any(name == model or name.startswith(model + ":") for name in installed_set):
+            return "installed"
+        return "missing"
+
+    optional_model_status = {m: _status_for_model(m) for m in optional_models}
+    payload = hw_to_dict(hw, rec, installed=installed_names)
     return templates.TemplateResponse(
         request,
         "hardware.html",
         {
             "hw": payload["hardware"],
             "rec": payload["recommendation"],
+            "installed_models": installed_models,
+            "installed_names": installed_names,
+            "optional_models": optional_models,
+            "optional_model_status": optional_model_status,
             "ollama_status": get_ollama_status(),
         },
     )
@@ -2031,7 +2103,10 @@ async def hardware_page(request: Request):
 async def hardware_api() -> JSONResponse:
     hw = detect_hardware()
     rec = recommend_models(hw)
-    return JSONResponse(hw_to_dict(hw, rec, installed=_ollama_installed_models()))
+    installed = _ollama_installed_models()
+    payload = hw_to_dict(hw, rec, installed=installed)
+    payload["installed_models"] = installed
+    return JSONResponse(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -2125,3 +2200,26 @@ async def start_ollama_pull(request: Request) -> JSONResponse:
     loop = asyncio.get_running_loop()
     _start_pull_thread(job, model, loop)
     return JSONResponse({"job_id": job.id, "model": model, "resumed": False})
+
+
+@app.post("/api/ollama/delete")
+async def delete_ollama_model(request: Request) -> JSONResponse:
+    """Delete an installed model through Ollama's daemon API."""
+    from app.services.ollama_models import delete_model, validate_model_name
+
+    body = await request.json()
+    raw = body.get("model") or ""
+    try:
+        model = validate_model_name(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    base_url = settings.ollama_host or "http://127.0.0.1:11434"
+    try:
+        delete_model(model, base_url=base_url)
+    except Exception as exc:
+        logger.warning("ollama delete failed for %s: %s", model, exc)
+        raise HTTPException(502, f"ollama delete failed: {exc}") from exc
+
+    _invalidate_installed_models_cache()
+    return JSONResponse({"ok": True, "model": model})
