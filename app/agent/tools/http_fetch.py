@@ -19,6 +19,13 @@ class FetchResult:
     status: int
     chars: int
     truncated: bool
+    # Publication date the page advertises in its metadata, when
+    # extractable. ``None`` means we couldn't tell — agent should
+    # treat the page as undated rather than current. Authoritative
+    # for recency triage compared to the URL-path sniff in
+    # web_search; trafilatura reads <meta name="article:published_time">,
+    # OpenGraph tags, JSON-LD, etc.
+    published_at: str | None = None
 
 
 _DEFAULT_MAX_CHARS = 8_000
@@ -48,10 +55,19 @@ def http_fetch(url: str, max_chars: int = _DEFAULT_MAX_CHARS) -> FetchResult:
     html = resp.text or ""
     extracted = trafilatura.extract(html, include_comments=False, include_tables=True)
     title = ""
+    published_at: str | None = None
     try:
         meta = trafilatura.extract_metadata(html)
-        if meta and getattr(meta, "title", None):
-            title = str(meta.title).strip()
+        if meta:
+            if getattr(meta, "title", None):
+                title = str(meta.title).strip()
+            # trafilatura returns dates as YYYY-MM-DD strings (or None).
+            # Surface this so the agent's recency discipline has something
+            # authoritative to consult; previously the agent had no way
+            # to know whether a fetched page was 3 years stale.
+            d = getattr(meta, "date", None)
+            if d:
+                published_at = str(d).strip() or None
     except Exception:
         title = ""
 
@@ -71,4 +87,5 @@ def http_fetch(url: str, max_chars: int = _DEFAULT_MAX_CHARS) -> FetchResult:
         status=int(resp.status_code),
         chars=len(text),
         truncated=truncated,
+        published_at=published_at,
     )

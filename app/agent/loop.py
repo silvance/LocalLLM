@@ -67,11 +67,18 @@ TOOL_SCHEMAS: list[dict] = [
 ]
 
 
-SYSTEM_PROMPT = """You are a research agent with access to web tools.
+_SYSTEM_PROMPT_TEMPLATE = """You are a research agent with access to web tools.
+
+Today's date is {today}. Your training data has a cutoff well before that;
+treat the live web as authoritative on anything time-sensitive.
 
 Tools available:
 - web_search(query, max_results=5): search the web for candidate sources.
-- http_fetch(url): download a page and extract its main text.
+  Each result includes `published_at` when the publication date is
+  detectable from the URL or snippet (may be a full YYYY-MM-DD, just
+  YYYY-MM, or just YYYY; or null when undetectable).
+- http_fetch(url): download a page and extract its main text. Returns
+  a `published_at` field when the page advertises one in its metadata.
 
 Strategy:
 1. Plan what you need to know.
@@ -79,16 +86,44 @@ Strategy:
 3. Pick 2-3 of the most relevant results and http_fetch them.
 4. Synthesize a complete, accurate answer that includes inline numeric
    citations like [1], [2] referencing the sources you actually used.
-5. End your response with a "Sources:" section listing the URLs in order.
+5. End your response with a "Sources:" section listing the URLs **with
+   their publication dates** when you have them — e.g. `[1] https://… (2026-03-19)`.
+
+RECENCY DISCIPLINE (mandatory for any "current / latest / known /
+recent / today / now" question, or anything mentioning a software
+version that ships frequently):
+- Today is {today}. The current calendar year is {year}.
+- Before citing a source, check its `published_at`. Anything older
+  than ~12 months for a recency-sensitive question is potentially
+  STALE and must NOT be presented as describing the current state.
+- If your top search hits are all stale, run the search AGAIN with a
+  year qualifier (e.g. append "{year}" or "{prev_year}") or a more
+  specific query. Don't settle for the first plausible-sounding hit.
+- If after a follow-up search you still only have stale data, say so
+  explicitly in your answer ("I could only find sources from
+  YYYY-MM-DD or earlier; the current state may have changed since")
+  rather than presenting old facts as current.
+- When you DO cite a source, name its date in the prose: "As of
+  YYYY-MM-DD, …" or "The most recent source I could find (dated
+  YYYY-MM-DD) reports …". Never imply currency you can't verify.
+- Concrete examples of stale-source failures to avoid:
+  * Citing a 3-year-old article about iOS 16.4 in answer to "what's
+    the current iOS version?".
+  * Quoting CVE numbers from a 2023 patch round when asked about
+    "current" vulnerabilities for software released in 2026.
+  * Treating "latest version" claims in old articles as still true.
 
 Constraints:
 - At most ~5 tool calls. Do not loop on the same query.
 - If a fetch fails, try a different URL — don't keep retrying the same one.
 - Don't invent URLs. Only fetch URLs returned by web_search.
-- If you already know the answer with confidence, skip the tools and answer.
+- If you already know the answer with confidence AND the question is
+  not recency-sensitive, you may skip the tools and answer. For
+  anything time-sensitive, search the web — your training data is
+  too stale to trust.
 
 CRITICAL — when tools return an error:
-- Tool results that look like {"error": "..."} mean the tool DID NOT WORK
+- Tool results that look like {{"error": "..."}} mean the tool DID NOT WORK
   and produced NO data. You have nothing to cite from that call.
 - Do NOT fabricate concrete facts (CVE IDs, version numbers, dates, names,
   URLs, statistics, quotes) to fill the gap. Inventing specifics is worse
@@ -100,6 +135,26 @@ CRITICAL — when tools return an error:
 - If only some tool calls failed but at least one returned real data, you
   may answer using that data — but only cite sources you actually fetched.
 """
+
+
+def _build_system_prompt(today_iso: str | None = None) -> str:
+    """Render SYSTEM_PROMPT with today's date filled in. Pulled out as
+    a function so tests can pin the date and so the prompt always
+    reflects the actual day the agent runs (instead of the day the
+    process started — relevant for long-lived servers)."""
+    from datetime import date
+    today = date.fromisoformat(today_iso) if today_iso else date.today()
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        today=today.isoformat(),
+        year=today.year,
+        prev_year=today.year - 1,
+    )
+
+
+# Back-compat name. Importers that grab `SYSTEM_PROMPT` directly get
+# a snapshot rendered at import time; the runner re-renders on each
+# call to avoid date drift on long-running processes.
+SYSTEM_PROMPT = _build_system_prompt()
 
 
 def _execute_tool(name: str, args: dict[str, Any]) -> dict:
@@ -168,7 +223,12 @@ def run_agent(
     # compare paths use, just with the agent's research-loop guidance
     # as the "task-specific" layer.
     from app.utils.system_prompt import compose as compose_system_prompt
-    system_content = compose_system_prompt(SYSTEM_PROMPT)
+    # Re-render so ``today`` reflects the calendar day the agent
+    # actually runs, not the day the server started. The recency-
+    # discipline section is date-templated, so an ssh'd box that's
+    # been up for weeks would otherwise tell the model the wrong
+    # current date.
+    system_content = compose_system_prompt(_build_system_prompt())
     messages: list[dict] = [
         {"role": "system", "content": system_content},
         {"role": "user", "content": user_prompt},
