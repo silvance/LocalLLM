@@ -161,6 +161,19 @@ def test_reviewer_instruction_includes_hardware_grounding() -> None:
     assert "domain" in text  # a "domain checks" section header is present
 
 
+def test_reviewer_instruction_includes_real_vs_simulated() -> None:
+    """Regression guard for Class 3 — reviewer must flag fake /
+    simulated implementations and recommend rebuild_different_writer
+    rather than letting the same writer keep faking output."""
+    pytest.importorskip("chromadb")
+    from app.web.app import REVIEWER_INSTRUCTION
+    text = REVIEWER_INSTRUCTION.lower()
+    assert "simulated" in text or "placeholder" in text
+    assert "rebuild_different_writer" in text
+    # The exact failure mode ChatGPT highlighted.
+    assert "for demonstration" in text or "would do x in production" in text
+
+
 def test_reviewer_verdict_dataclass_fields_default_safe() -> None:
     """A bare ReviewerVerdict (no JSON parsed) defaults to a state
     that's safe for the orchestrator: rebuild same, not approved."""

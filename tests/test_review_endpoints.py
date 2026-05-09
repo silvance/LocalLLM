@@ -413,6 +413,151 @@ def test_fallback_writer_engages_after_repeated_gate_failures(
     )
 
 
+def test_domain_failure_triggers_swap_on_first_reviewer_blocker(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """A reviewer round that returns ANY blockers should immediately
+    engage the fallback (default max_same_writer_domain_failures=1).
+    Distinct from the existing `rebuild_different_writer` path —
+    the reviewer doesn't have to opt in; just having blockers is
+    enough."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    clean_code = "```python\ndef add(a, b):\n    return a + b\n```\n"
+    review_with_blockers = (
+        "Bug: missing edge case.\n\n```json\n"
+        '{"pass": false, "blockers": ["does not handle negative numbers"], '
+        '"safe_to_rebuild": true, "recommended_next_action": "rebuild_same_writer"}\n```'
+    )
+    fixed = "```python\ndef add(a, b):\n    return a + b if a or b else 0\n```\n"
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[clean_code, review_with_blockers, fixed])
+
+    r = client.post("/api/review", json={
+        "prompt": "implement add",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "fallback_writer_model": "granite",
+        "rounds": 4,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+    roles = [s.role for s in saved.sections]
+    # writer / reviewer / fallback notice / writer (granite)
+    assert "fallback" in roles, f"domain swap not engaged; roles={roles}"
+    assert any(c["selection"] == "granite" for c in calls), \
+        "fallback model never invoked after domain failure"
+
+
+def test_max_unique_builders_caps_chain(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """fallback_writer_model accepts a comma-separated chain. After
+    using MAX_UNIQUE_BUILDERS (=3) total writers, no more swaps fire
+    even if more failures happen."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    # Every writer round produces broken code → gate fails forever.
+    broken = "```python\ndef foo():\n    return ghost\n```\n"
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[broken] * 20)
+
+    r = client.post("/api/review", json={
+        "prompt": "thing",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        # Chain: 3 fallbacks proposed. Cap should clip at 2 swaps
+        # (primary + 2 fallbacks = 3 total = MAX_UNIQUE_BUILDERS).
+        "fallback_writer_model": "granite, gemma, qwen2.5-coder:32b",
+        "rounds": 12,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 8.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    # Distinct writer models in the call log (selection is whatever
+    # `model_key` got passed to chat_service.stream_chat).
+    distinct_writers = {
+        c["selection"] for c in calls
+        if c["selection"] in {"qwen", "granite", "gemma", "qwen2.5-coder:32b"}
+    }
+    assert len(distinct_writers) <= 3, (
+        f"used too many builders, expected ≤3 (MAX_UNIQUE_BUILDERS): {distinct_writers}"
+    )
+
+
+def test_review_aborts_on_repeated_blocker(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Same blocker text appearing in two reviewer rounds means we're
+    stuck — abort instead of burning more rounds."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    clean1 = "```python\ndef sniff_ble():\n    pass\n```\n"
+    blocker_review = (
+        "Same architectural mistake.\n\n```json\n"
+        '{"pass": false, "blockers": ["BLE cannot be sniffed from wlan0"], '
+        '"safe_to_rebuild": true, "recommended_next_action": "rebuild_same_writer"}\n```'
+    )
+    clean2 = "```python\ndef sniff_ble2():\n    pass\n```\n"
+    same_blocker_again = blocker_review  # identical blocker text
+    extra = "```python\npass\n```\n"
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[
+        clean1, blocker_review, clean2, same_blocker_again, extra,
+    ])
+
+    r = client.post("/api/review", json={
+        "prompt": "sniff BLE",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "rounds": 10,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 8.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    # An orchestrator-notice section should announce the abort.
+    fallback_sections = [s for s in saved.sections if s.role == "fallback"]
+    assert any(
+        "stopping:" in s.text.lower()
+        or "same blocker" in s.text.lower()
+        or "abort" in s.text.lower()
+        for s in fallback_sections
+    ), f"no abort notice; fallback sections: {[s.text for s in fallback_sections]}"
+
+
 def test_review_runs_reviewer_when_gates_pass(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:

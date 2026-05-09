@@ -72,8 +72,10 @@ from app.utils.comparison_storage import (
 from app.services.review_gates import (
     all_passed as gates_all_passed,
     format_for_writer as gates_format_for_writer,
+    gate_candidate_count,
     run_gates,
 )
+from app.utils.outcomes_log import OutcomeLog, default_log_path, hash_prompt
 from app.services.reviewer_verdict import (
     SCHEMA_INSTRUCTION as REVIEWER_VERDICT_SCHEMA,
     ReviewerVerdict,
@@ -110,6 +112,7 @@ chat_storage = ChatStorage(_CHATS_DIR)
 review_storage = ReviewStorage(_REVIEWS_DIR)
 comparison_storage = ComparisonStorage(_COMPARISONS_DIR)
 job_manager = JobManager()
+outcomes_log = OutcomeLog(default_log_path())
 
 
 app = FastAPI(title="LocalLLM")
@@ -507,6 +510,28 @@ REVIEWER_INSTRUCTION = (
     "yaml.load without SafeLoader, eval, pickle on untrusted input), "
     "concurrency hazards, etc.\n\n"
 
+    "## Class 3: real vs simulated implementation\n"
+    "Models will sometimes return code that LOOKS finished but doesn't "
+    "actually do the thing. Flag any of these:\n\n"
+    "- Comments like `# simulated`, `# placeholder`, `# for "
+    "demonstration`, `# would do X in production`, `# TODO: actually "
+    "implement` next to code that pretends to be the real thing.\n"
+    "- Variable / function names like `simulated_packet`, "
+    "`fake_device`, `mock_response`, `dummy_data` in code that's "
+    "supposed to be production logic (not a test fixture).\n"
+    "- String literals like `print(\"simulated BLE packet: 0x42\")` — "
+    "the model is announcing that the output is fabricated.\n"
+    "- Function bodies that are just `time.sleep(...)` + a `print` "
+    "loop when the function name implies actual I/O (`sniff_*`, "
+    "`fetch_*`, `scan_*`, `parse_*`).\n"
+    "- Hardcoded \"realistic-looking\" return values: "
+    "`return [{\"name\": \"AC:DE:48:00:11:22\", \"rssi\": -50}]` "
+    "from a function that should be doing live discovery.\n\n"
+    "If you see this, the right verdict is `pass: false`, "
+    "`recommended_next_action: \"rebuild_different_writer\"` — the "
+    "writer is taking a shortcut and a different model is more likely "
+    "to attempt the real implementation.\n\n"
+
     "## Class 2: domain / hardware / protocol grounding\n"
     "Verify the implementation is actually possible on the stated "
     "hardware and OS — this is where local code-gen models hallucinate "
@@ -641,11 +666,11 @@ async def start_review(request: Request) -> JSONResponse:
     writer_model = body.get("writer_model") or "qwen"
     reviewer_model = body.get("reviewer_model") or "gemma"
     fallback_writer_model = (body.get("fallback_writer_model") or "").strip() or None
-    rounds = int(body.get("rounds") or 3)
+    rounds = int(body.get("rounds") or DEFAULT_MAX_TOTAL_ROUNDS)
     if rounds < 2:
         raise HTTPException(400, "rounds must be at least 2 (write + review)")
-    if rounds > 6:
-        raise HTTPException(400, "rounds capped at 6")
+    if rounds > MAX_TOTAL_ROUNDS_CAP:
+        raise HTTPException(400, f"rounds capped at {MAX_TOTAL_ROUNDS_CAP}")
 
     system_prompt = (body.get("system_prompt") or "").strip() or settings.default_system_prompt
     temperature = body.get("temperature")
@@ -686,7 +711,18 @@ async def start_review(request: Request) -> JSONResponse:
     return JSONResponse({"job_id": job.id, "review_id": review_session.id})
 
 
-_FALLBACK_WRITER_THRESHOLD = 2  # consecutive gate failures before swap
+# Loop budget — multi-dimensional caps for the writer ↔ reviewer loop.
+# Each dimension counts a different failure mode so a writer that's
+# bad at code-correctness gets swapped on a different schedule than
+# one that's bad at domain grounding. All operator-tunable; the
+# defaults match the field-tested values from a few real review runs.
+DEFAULT_MAX_TOTAL_ROUNDS = 10            # was bare `rounds`; cap raised below
+MAX_TOTAL_ROUNDS_CAP = 12                # absolute upper bound on rounds input
+MAX_SAME_WRITER_STATIC_FAILURES = 2      # static-gate fails before swap
+MAX_SAME_WRITER_DOMAIN_FAILURES = 1      # reviewer-blocker rounds before swap
+MAX_UNIQUE_BUILDERS = 3                  # primary + ≤2 fallbacks total
+MAX_SAME_BLOCKER_REPEATS = 2             # same blocker text twice → abort
+_FALLBACK_WRITER_THRESHOLD = MAX_SAME_WRITER_STATIC_FAILURES  # legacy alias
 
 
 def _serialize_sections(sections: list[dict]) -> list[dict]:
@@ -739,12 +775,34 @@ def _start_review_thread(
         # writer when the primary fails repeatedly. Captured by the
         # closures below so they always pick up the current value.
         active_writer = writer_model
-        consecutive_gate_fails = 0
-        fallback_engaged = False
-        # Set true the first time the fallback writer is engaged so the
-        # next writer round uses a fresh-start prompt instead of the
-        # usual "fix your previous code" framing. Without this the
-        # fallback model just regurgitates the broken primary output.
+        # Per-writer failure counters. Keyed by writer name so a swap
+        # resets the budget for the new writer.
+        writer_static_fails: dict[str, int] = {writer_model: 0}
+        writer_domain_fails: dict[str, int] = {writer_model: 0}
+        # Builders we've used so far, in swap order. Capped at
+        # MAX_UNIQUE_BUILDERS so we don't churn through every model
+        # the operator has installed.
+        used_builders: list[str] = [writer_model]
+        # Remaining fallbacks. fallback_writer_model accepts comma-
+        # separated names so the operator can configure a chain
+        # (e.g. "deepseek-coder-v2:latest,granite4") and the swap
+        # logic pops the next one each time.
+        if fallback_writer_model:
+            fallback_chain: list[str] = [
+                m.strip() for m in fallback_writer_model.split(",") if m.strip()
+            ]
+        else:
+            fallback_chain = []
+        # Reviewer blocker frequency. Normalised text → count across
+        # ALL reviewer rounds; if any blocker hits MAX_SAME_BLOCKER_REPEATS
+        # the orchestrator aborts because we're clearly stuck.
+        blocker_counts: dict[str, int] = {}
+        # Set when a hard-stop condition fires so the main loop breaks
+        # at the next iteration boundary.
+        abort_reason: str | None = None
+        # Set true the first time we swap to a fallback so the next
+        # writer round uses the fresh-start kickoff prompt instead of
+        # the usual "fix your previous code" framing.
         fallback_kickoff_pending = False
         # Accumulated gate-failure messages so the fallback's kickoff
         # prompt can list every static issue the previous writer kept
@@ -831,31 +889,67 @@ def _start_review_thread(
             job_manager.append_chunk(job.id, text, loop)
             sections.append({"role": role, "model": model, "text": text})
 
+        def _normalize_blocker(text: str) -> str:
+            """Canonical key for blocker-repetition counting. Lowercase,
+            collapse whitespace, truncate so trivial wording differences
+            ("missing import os" vs "missing import os.path") still
+            count as the same blocker if they're effectively the same."""
+            return " ".join(text.lower().split())[:200]
+
         def gate_or_review(writer_text: str) -> None:
             """Run static-analysis gates on the writer's latest output.
-            If any gate fails, append a `gates` section with the
-            failure messages and skip the reviewer for this round —
-            no point asking the domain reviewer to opine on code that
-            doesn't even parse. If gates pass (or there are no code
-            blocks to gate), call the reviewer as before.
-
-            Side effect: bumps `consecutive_gate_fails` on a fail and
-            resets it on a pass. The writer-rebuild step uses that
-            counter (plus the operator's fallback_writer_model) to
-            decide whether to swap writers for the next round.
+            On failure: emit a `gates` section, bump
+            writer_static_fails[active_writer], skip the reviewer.
+            On success: run the reviewer; bump
+            writer_domain_fails[active_writer] if there are any
+            blockers; track each blocker's text frequency and abort
+            the loop if any text repeats >= MAX_SAME_BLOCKER_REPEATS.
             """
-            nonlocal consecutive_gate_fails
+            nonlocal abort_reason
+            prompt_h = hash_prompt(prompt)
+            # Gate 0: candidate_count runs on the FULL writer response
+            # so its failure message can talk about fence syntax. If
+            # the writer emitted zero or multiple python blocks, the
+            # downstream gates would either run on empty code (giving
+            # vacuous "OK"s) or on a concatenation of unrelated
+            # programs (giving spurious failures), neither of which
+            # gives the writer useful feedback.
+            cc = gate_candidate_count(writer_text)
+            if not cc.passed:
+                writer_static_fails[active_writer] = writer_static_fails.get(active_writer, 0) + 1
+                feedback = gates_format_for_writer([cc])
+                gate_failure_history.append(feedback)
+                _emit_inline_section("gates", "(static analysis)", feedback)
+                outcomes_log.append(
+                    review_id=review_id, writer=active_writer,
+                    event="gate_fail", gate=cc.name, prompt_hash=prompt_h,
+                )
+                return
+
             blocks = extract_python_blocks(writer_text)
             code = "\n\n".join(blocks)
             results = run_gates(code) if code else []
             if results and not gates_all_passed(results):
-                consecutive_gate_fails += 1
+                writer_static_fails[active_writer] = writer_static_fails.get(active_writer, 0) + 1
                 feedback = gates_format_for_writer(results)
                 gate_failure_history.append(feedback)
                 _emit_inline_section("gates", "(static analysis)", feedback)
+                first_fail = next((r for r in results if not r.passed), None)
+                outcomes_log.append(
+                    review_id=review_id, writer=active_writer,
+                    event="gate_fail",
+                    gate=first_fail.name if first_fail else "unknown",
+                    prompt_hash=prompt_h,
+                )
                 return
 
-            consecutive_gate_fails = 0
+            # All gates passed — log it before invoking the reviewer
+            # so the model-stats CLI can compute a clean pass rate.
+            outcomes_log.append(
+                review_id=review_id, writer=active_writer,
+                event="gate_pass", prompt_hash=prompt_h,
+            )
+
             review_user = (
                 f"{REVIEWER_INSTRUCTION}\n\n{REVIEWER_VERDICT_SCHEMA}\n\n"
                 f"---\n\nOriginal task:\n{prompt}\n\n"
@@ -864,6 +958,27 @@ def _start_review_thread(
             msgs = base_messages() + [ChatMessage(role="user", content=review_user)]
             text = run_section(role="reviewer", model=reviewer_model, messages=msgs)
             verdict = parse_reviewer_verdict(text)
+
+            # Domain-failure tracking. Any blockers from the reviewer
+            # count as a domain failure for the current writer.
+            if verdict.blockers:
+                writer_domain_fails[active_writer] = (
+                    writer_domain_fails.get(active_writer, 0) + 1
+                )
+                # Repeat tracking is per UNIQUE blocker, regardless of
+                # which writer round produced it — same conceptual bug
+                # surfacing twice means we're stuck.
+                for b in verdict.blockers:
+                    key = _normalize_blocker(b)
+                    if not key:
+                        continue
+                    blocker_counts[key] = blocker_counts.get(key, 0) + 1
+                    if blocker_counts[key] >= MAX_SAME_BLOCKER_REPEATS and abort_reason is None:
+                        abort_reason = (
+                            f"Same blocker reported {blocker_counts[key]} times: "
+                            f"{b[:120]!r}"
+                        )
+
             # Persist the cleaned prose (JSON block stripped) for the
             # human-facing review log; the verdict object is kept on the
             # in-memory section dict for the orchestrator to branch on.
@@ -873,49 +988,76 @@ def _start_review_thread(
                 "text": verdict.display_text(),
                 "verdict": verdict,
             })
+            # Outcome log: writer attribution is the active_writer
+            # (the model whose code the reviewer just looked at), not
+            # the reviewer model.
+            outcomes_log.append(
+                review_id=review_id, writer=active_writer,
+                event="review_block" if verdict.blockers else "review_pass",
+                blocker_count=len(verdict.blockers) or None,
+                prompt_hash=prompt_h,
+            )
 
         def maybe_swap_writer(reason: str | None = None) -> None:
-            """If the operator configured a fallback writer, swap the
-            primary out. Idempotent — only fires once per review.
+            """Pop the next builder off `fallback_chain` and engage it.
 
-            Trigger conditions:
-              * Default (reason=None): primary failed gates >= N times
-                consecutively (the static-analysis trigger).
-              * reason="reviewer_recommended": reviewer's verdict
-                returned next_action == "rebuild_different_writer",
-                meaning the writer keeps making the same domain /
-                hardware-grounding mistake. Bypasses the gate
-                threshold entirely.
+            Triggers:
+              * reason=None — static-gate threshold met
+                (writer_static_fails[active] >= MAX_SAME_WRITER_STATIC_FAILURES).
+              * reason="domain" — reviewer-blocker threshold met
+                (writer_domain_fails[active] >= MAX_SAME_WRITER_DOMAIN_FAILURES).
+              * reason="reviewer_recommended" — reviewer's verdict
+                next_action == "rebuild_different_writer". Bypasses
+                the static / domain thresholds.
+
+            Hard caps:
+              * fallback_chain must be non-empty.
+              * len(used_builders) < MAX_UNIQUE_BUILDERS — we don't
+                churn through every model installed.
             """
-            nonlocal active_writer, fallback_engaged, fallback_kickoff_pending
-            if fallback_engaged:
+            nonlocal active_writer, fallback_kickoff_pending
+            if not fallback_chain:
                 return
-            if not fallback_writer_model:
+            if len(used_builders) >= MAX_UNIQUE_BUILDERS:
                 return
-            if reason is None and consecutive_gate_fails < _FALLBACK_WRITER_THRESHOLD:
+            if reason is None and writer_static_fails.get(active_writer, 0) < MAX_SAME_WRITER_STATIC_FAILURES:
                 return
+            if reason == "domain" and writer_domain_fails.get(active_writer, 0) < MAX_SAME_WRITER_DOMAIN_FAILURES:
+                return
+
             previous = active_writer
-            active_writer = fallback_writer_model
-            fallback_engaged = True
+            active_writer = fallback_chain.pop(0)
+            used_builders.append(active_writer)
+            writer_static_fails.setdefault(active_writer, 0)
+            writer_domain_fails.setdefault(active_writer, 0)
             # Tell the next writer-round to use the fresh-start kickoff
             # prompt instead of the usual "fix your previous code"
             # template — otherwise the fallback model just regurgitates
             # whatever broken pattern got us here.
             fallback_kickoff_pending = True
+
             if reason == "reviewer_recommended":
                 why = (
-                    f"Reviewer recommended a different writer model — the "
-                    f"current primary keeps making the same domain-level "
-                    f"mistake. "
+                    "Reviewer recommended a different writer model — the "
+                    "current primary keeps making the same domain-level "
+                    "mistake. "
+                )
+            elif reason == "domain":
+                why = (
+                    f"Writer `{previous}` failed reviewer domain gate "
+                    f"{writer_domain_fails.get(previous, 0)} time(s) "
+                    f"(threshold: {MAX_SAME_WRITER_DOMAIN_FAILURES}). "
                 )
             else:
                 why = (
-                    f"Primary writer `{previous}` failed static-analysis "
-                    f"gates {consecutive_gate_fails} times in a row. "
+                    f"Writer `{previous}` failed static-analysis gates "
+                    f"{writer_static_fails.get(previous, 0)} times "
+                    f"(threshold: {MAX_SAME_WRITER_STATIC_FAILURES}). "
                 )
             notice = (
-                f"{why}Switching to fallback writer "
-                f"`{fallback_writer_model}` for the next rebuild round."
+                f"{why}Switching builder #{len(used_builders)}/"
+                f"{MAX_UNIQUE_BUILDERS} to `{active_writer}` for the next "
+                f"rebuild round."
             )
             _emit_inline_section("fallback", "(orchestrator)", notice)
 
@@ -948,10 +1090,12 @@ def _start_review_thread(
             prose / setup blocks since those are what tripped the
             block extractor in the first place)."""
             joined = "\n\n".join(gate_failure_history[-3:]) or "(none recorded)"
+            primary_static = writer_static_fails.get(primary_name, 0)
+            primary_domain = writer_domain_fails.get(primary_name, 0)
             return (
                 f"You are the fallback builder, taking over from "
-                f"`{primary_name}` which failed static-analysis gates "
-                f"{consecutive_gate_fails} times in a row.\n\n"
+                f"`{primary_name}` (static failures: {primary_static}, "
+                f"reviewer-blocker rounds: {primary_domain}).\n\n"
                 f"Original user request:\n{prompt}\n\n"
                 f"Required output format:\n"
                 f"- Return EXACTLY ONE fenced ```python ... ``` code block.\n"
@@ -981,6 +1125,22 @@ def _start_review_thread(
 
             # Subsequent rounds alternate writer revision / (gates → reviewer)
             for i in range(2, rounds):
+                # Hard-abort check: same blocker text repeated past
+                # threshold means we're stuck. Set by gate_or_review
+                # after each reviewer round.
+                if abort_reason is not None:
+                    _emit_inline_section(
+                        "fallback", "(orchestrator)",
+                        f"Stopping: {abort_reason}. The loop isn't "
+                        f"making progress — abort is cheaper than "
+                        f"more rounds.",
+                    )
+                    outcomes_log.append(
+                        review_id=review_id, writer=active_writer,
+                        event="abort", prompt_hash=hash_prompt(prompt),
+                        detail=abort_reason,
+                    )
+                    break
                 if i % 2 == 0:
                     # Before the next rebuild, consult the latest
                     # reviewer verdict (if any). The reviewer's JSON
@@ -1003,9 +1163,14 @@ def _start_review_thread(
                         break
                     if last_verdict and last_verdict.next_action == "rebuild_different_writer":
                         maybe_swap_writer(reason="reviewer_recommended")
+                    elif last and last["role"] == "reviewer":
+                        # Reviewer-blocker swap — kick fallback if the
+                        # active writer has hit its domain-failure
+                        # threshold (default: 1).
+                        maybe_swap_writer(reason="domain")
                     else:
-                        # Static-analysis trigger only — reviewer is
-                        # happy enough with the writer model.
+                        # Last slot was a `gates` fail — try the static
+                        # threshold instead.
                         maybe_swap_writer()
                     # Pick the prompt: fresh-start kickoff if we just
                     # engaged the fallback (don't show it the broken
@@ -1391,3 +1556,87 @@ async def hardware_api() -> JSONResponse:
     hw = detect_hardware()
     rec = recommend_models(hw)
     return JSONResponse(hw_to_dict(hw, rec, installed=_ollama_installed_models()))
+
+
+# ---------------------------------------------------------------------------
+# Ollama model management — Pull missing models from the /hardware page
+# ---------------------------------------------------------------------------
+
+def _start_pull_thread(job: Job, model: str, loop: asyncio.AbstractEventLoop) -> None:
+    """Run an Ollama `/api/pull` stream in a background thread, pumping
+    each NDJSON progress event into the JobManager so SSE subscribers
+    see it. Reuses the standard /api/jobs/{id}/stream path the chat /
+    review pages already use — no separate streaming route needed."""
+    from app.services.ollama_models import pull_model
+
+    settings = chat_service.settings
+    base_url = settings.ollama_host or "http://127.0.0.1:11434"
+
+    def _runner() -> None:
+        try:
+            terminal_status = "done"
+            error_text: str | None = None
+            for event in pull_model(model, base_url=base_url):
+                if job_manager.is_stop_requested(job.id):
+                    terminal_status = "stopped"
+                    break
+                if "error" in event:
+                    terminal_status = "error"
+                    error_text = str(event["error"])
+                    job_manager.emit_event(job.id, "pull_event", event, loop)
+                    break
+                # Pumping as a structural event (not a token) so the
+                # frontend can render a progress bar from the
+                # `total` / `completed` fields without parsing prose.
+                job_manager.emit_event(job.id, "pull_event", event, loop)
+            job_manager.finish(
+                job.id,
+                terminal_status,
+                loop,
+                error=error_text,
+                metadata={"kind": "ollama_pull", "model": model},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ollama pull failed for %s", model)
+            job_manager.finish(
+                job.id,
+                "error",
+                loop,
+                error=str(exc),
+                metadata={"kind": "ollama_pull", "model": model},
+            )
+
+    threading.Thread(
+        target=_runner, daemon=True, name=f"pull-{model[:24]}",
+    ).start()
+
+
+@app.post("/api/ollama/pull")
+async def start_ollama_pull(request: Request) -> JSONResponse:
+    """Kick off an Ollama model pull as a JobManager job. Returns the
+    job_id so the client can subscribe to /api/jobs/{job_id}/stream
+    and receive `pull_event` SSE messages with progress."""
+    from app.services.ollama_models import validate_model_name
+
+    body = await request.json()
+    raw = body.get("model") or ""
+    try:
+        model = validate_model_name(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    # Refuse duplicate pulls — if a pull for this exact model is
+    # already running we just return the existing job_id so the UI
+    # reattaches its progress stream instead of doubling traffic.
+    existing = job_manager.list_with_chat_prefix(f"pull:{model}")
+    for j in existing:
+        if j.status in ("pending", "streaming"):
+            return JSONResponse({"job_id": j.id, "model": model, "resumed": True})
+
+    job = job_manager.create(
+        chat_id=f"pull:{model}",
+        request_data={"kind": "ollama_pull", "model": model},
+    )
+    loop = asyncio.get_running_loop()
+    _start_pull_thread(job, model, loop)
+    return JSONResponse({"job_id": job.id, "model": model, "resumed": False})

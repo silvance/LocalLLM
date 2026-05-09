@@ -28,6 +28,7 @@ import ast
 import importlib.util
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,56 @@ class GateResult:
 
 
 # --- Gates ----------------------------------------------------------------
+
+
+def gate_candidate_count(text: str) -> GateResult:
+    """Gate 0: the writer's response must contain exactly one explicit
+    fenced ```python``` block.
+
+    - 0 blocks → fail with a message that's specifically about the
+      fence syntax, not the code itself ("did you forget the
+      ```python tag?"). Helps the writer recover faster than a
+      generic syntax-error spew.
+    - >1 blocks → fail with "multiple_candidates". The writer often
+      gives "here's option A, here's option B" or includes example
+      blocks alongside the answer; downstream gates will get
+      confused trying to lint a concatenation of two unrelated
+      programs.
+    - 1 block → pass. Subsequent gates see only the canonical
+      candidate.
+
+    Operates on the FULL writer response, not on extracted code, so
+    the message can talk about fence syntax. Subsequent gates run on
+    the extracted code via the standard run_gates pipeline.
+    """
+    from app.utils.code_linter import extract_python_blocks
+    blocks = extract_python_blocks(text or "")
+    n = len(blocks)
+    if n == 1:
+        return GateResult("candidate_count", passed=True)
+    if n == 0:
+        return GateResult(
+            "candidate_count",
+            passed=False,
+            messages=[
+                "no_candidate: no explicit ```python``` fenced code block "
+                "found in the response. Resubmit exactly one block "
+                "beginning with ```python (lowercase, no language tag is "
+                "rejected because untagged blocks were grabbing bash setup "
+                "snippets and false-flagging them as Python).",
+            ],
+        )
+    return GateResult(
+        "candidate_count",
+        passed=False,
+        messages=[
+            f"multiple_candidates: response contains {n} python code "
+            f"blocks. Return exactly one complete program. Do not "
+            f"include alternative versions, examples, setup commands, "
+            f"or 'here's option A / option B' framing. Pick the version "
+            f"you actually intend the user to run.",
+        ],
+    )
 
 
 def gate_syntax(code: str) -> GateResult:
@@ -213,6 +264,98 @@ def gate_smoke(code: str, *, timeout: float = 5.0) -> GateResult:
         return GateResult("smoke", passed=False, messages=tail or ["import failed"])
 
 
+# --- gate_no_placeholder_impl --------------------------------------------
+
+# Patterns that strongly suggest the writer wrote a "looks-finished but
+# doesn't actually do the thing" implementation. Each pattern carries
+# its own short label so the failure message points at WHY it's
+# suspicious, not just WHERE.
+#
+# Conservative on purpose — false positives waste reviewer time more
+# than false negatives, and the reviewer's Class 3 prompt block is the
+# secondary check.
+_PLACEHOLDER_PATTERNS: tuple[tuple["re.Pattern[str]", str], ...] = (
+    # Comments that announce the code is a stand-in.
+    (re.compile(
+        r"#.*\b("
+        r"placeholder|stubbed|stub for|for demonstration|for now,? just|"
+        r"todo:?\s*(?:implement|actually|real|hook up|wire)|"
+        r"fixme:?\s*(?:implement|actually|real|hook up|wire)|"
+        r"in (?:a )?real (?:impl|implementation|version)|"
+        r"would.* in (?:production|the real thing)|"
+        r"simulated\b|simulating\b|simulate\b|"
+        r"mocked\b|mocking\b|"
+        r"demonstrative purposes?"
+        r")\b",
+        re.IGNORECASE,
+    ), "comment claims fake / simulated / placeholder impl"),
+    # Variables / functions whose NAME announces they're fake.
+    # We don't try to allow `mock_test_*` / `fake_fixture_*` /
+    # similar — too many corner cases for a static regex. If the
+    # operator is reviewing test scaffolding, set
+    # LOCALLLM_REVIEW_GATE_PLACEHOLDER_DISABLED=1 to skip this gate.
+    (re.compile(
+        r"\b(?:simulated|fake|mock|dummy|placeholder)_\w+",
+        re.IGNORECASE,
+    ), "identifier name suggests fake / simulated value"),
+    # String literals that label themselves as fake output. Hits e.g.
+    # `print("simulated BLE packet: 0x42")` — exactly the failure mode
+    # ChatGPT flagged.
+    (re.compile(
+        r"['\"]\s*(?:simulated|fake|mock(?:ed)?|placeholder|dummy)\b"
+        r"[^'\"]{0,80}['\"]",
+        re.IGNORECASE,
+    ), "string literal labels its content as fake / simulated"),
+)
+
+
+def _placeholder_disabled() -> bool:
+    return os.getenv("LOCALLLM_REVIEW_GATE_PLACEHOLDER_DISABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def gate_no_placeholder_impl(code: str) -> GateResult:
+    """Static check for "looks complete, doesn't actually do it" code.
+
+    Targets the failure mode where a writer's response parses cleanly,
+    lints cleanly, imports cleanly — but the body is `time.sleep(...)`
+    + `print("simulated BLE packet")`, or returns a hardcoded fake
+    payload. The reviewer's domain prompt catches this too, but a
+    static pre-check stops the loop from spending a reviewer round on
+    obviously-fake code.
+
+    Operator can opt out with ``LOCALLLM_REVIEW_GATE_PLACEHOLDER_DISABLED=1``
+    for legitimate use of `mock_*` / `fake_*` (e.g. test scaffolding
+    being reviewed)."""
+    if _placeholder_disabled():
+        return GateResult(
+            "real_implementation", passed=True,
+            messages=["(disabled via LOCALLLM_REVIEW_GATE_PLACEHOLDER_DISABLED)"],
+        )
+    findings: list[str] = []
+    for line_no, line in enumerate(code.splitlines(), 1):
+        # Cheap whitespace cap — a 5000-char line is almost certainly
+        # generated noise, not a real placeholder.
+        if len(line) > 500:
+            continue
+        for pattern, label in _PLACEHOLDER_PATTERNS:
+            m = pattern.search(line)
+            if m:
+                snippet = line.strip()
+                if len(snippet) > 100:
+                    snippet = snippet[:97] + "..."
+                findings.append(f"line {line_no}: {label} — {snippet!r}")
+                break  # one finding per line is enough
+    if not findings:
+        return GateResult("real_implementation", passed=True)
+    return GateResult(
+        "real_implementation",
+        passed=False,
+        messages=findings[:15],
+    )
+
+
 # --- Runner ---------------------------------------------------------------
 
 
@@ -223,6 +366,7 @@ DEFAULT_GATES: tuple[Callable[[str], GateResult], ...] = (
     gate_syntax,
     gate_lint,
     gate_imports,
+    gate_no_placeholder_impl,
     gate_smoke,
 )
 

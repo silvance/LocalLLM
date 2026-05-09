@@ -9,12 +9,134 @@ from app.services.review_gates import (
     GateResult,
     all_passed,
     format_for_writer,
+    gate_candidate_count,
     gate_imports,
     gate_lint,
     gate_smoke,
     gate_syntax,
     run_gates,
 )
+
+
+# ---------------------------------------------------------------------------
+# gate_candidate_count (Gate 0)
+# ---------------------------------------------------------------------------
+
+def test_candidate_count_passes_on_single_python_block() -> None:
+    text = (
+        "Here you go:\n\n"
+        "```python\n"
+        "def add(a, b):\n    return a + b\n"
+        "```\n"
+    )
+    r = gate_candidate_count(text)
+    assert r.passed is True
+
+
+def test_candidate_count_fails_when_no_python_block() -> None:
+    text = (
+        "I think the answer is to use scapy. Run:\n\n"
+        "```bash\n"
+        "pip install scapy\n"
+        "```\n"
+    )
+    r = gate_candidate_count(text)
+    assert r.passed is False
+    assert "no_candidate" in r.messages[0]
+    # Message must talk about fence syntax, not 'syntax error'.
+    assert "```python" in r.messages[0]
+
+
+def test_candidate_count_fails_on_multiple_python_blocks() -> None:
+    text = (
+        "Option A:\n```python\ndef a(): pass\n```\n\n"
+        "Option B:\n```python\ndef b(): pass\n```\n"
+    )
+    r = gate_candidate_count(text)
+    assert r.passed is False
+    assert "multiple_candidates" in r.messages[0]
+    assert "2 python code blocks" in r.messages[0]
+
+
+def test_candidate_count_handles_empty_input() -> None:
+    r = gate_candidate_count("")
+    assert r.passed is False
+    assert "no_candidate" in r.messages[0]
+
+
+# ---------------------------------------------------------------------------
+# gate_no_placeholder_impl
+# ---------------------------------------------------------------------------
+
+def test_placeholder_gate_passes_on_real_code() -> None:
+    code = (
+        "import os\n"
+        "def cwd():\n"
+        "    return os.getcwd()\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is True
+
+
+def test_placeholder_gate_flags_fake_print() -> None:
+    """The exact failure mode ChatGPT highlighted — a `print` of a
+    string that announces it's simulated."""
+    code = (
+        "def sniff_ble():\n"
+        "    print('simulated BLE packet: 0x42')\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is False
+    assert any("string literal" in m.lower() or "fake" in m.lower() for m in r.messages)
+
+
+def test_placeholder_gate_flags_todo_implement_comment() -> None:
+    code = (
+        "def fetch_data():\n"
+        "    # TODO: implement actual fetch\n"
+        "    return None\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is False
+
+
+def test_placeholder_gate_flags_simulated_variable_name() -> None:
+    code = (
+        "def scan():\n"
+        "    simulated_packet = {'rssi': -50}\n"
+        "    return simulated_packet\n"
+    )
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is False
+    assert any("identifier" in m.lower() for m in r.messages)
+
+
+def test_placeholder_gate_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operator escape hatch — set the env var when reviewing test
+    scaffolding (`mock_*` / `fake_*` are legitimate there)."""
+    monkeypatch.setenv("LOCALLLM_REVIEW_GATE_PLACEHOLDER_DISABLED", "1")
+    code = "def x():\n    print('simulated thing')\n"
+    from app.services.review_gates import gate_no_placeholder_impl
+    r = gate_no_placeholder_impl(code)
+    assert r.passed is True
+    assert "disabled" in r.messages[0].lower()
+
+
+def test_placeholder_gate_in_default_chain() -> None:
+    """Regression: gate_no_placeholder_impl must be in DEFAULT_GATES so
+    it actually runs without the orchestrator opting in. Sits BEFORE
+    gate_smoke because static checks are cheaper than subprocess runs."""
+    from app.services.review_gates import (
+        DEFAULT_GATES,
+        gate_no_placeholder_impl,
+        gate_smoke,
+    )
+    assert gate_no_placeholder_impl in DEFAULT_GATES
+    assert DEFAULT_GATES.index(gate_no_placeholder_impl) < DEFAULT_GATES.index(gate_smoke)
 
 
 # ---------------------------------------------------------------------------
