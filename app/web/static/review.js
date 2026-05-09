@@ -11,6 +11,7 @@
   const $reviewerModel = document.getElementById("reviewer-model");
   const $fallbackWriterModel = document.getElementById("fallback-writer-model");
   const $rounds = document.getElementById("rounds");
+  const $applyPriorLessons = document.getElementById("apply-prior-lessons");
   const $systemPrompt = document.getElementById("system-prompt");
   const $temperature = document.getElementById("temperature");
   const $maxTokens = document.getElementById("max-tokens");
@@ -393,6 +394,7 @@
         reviewer_model: $reviewerModel.value,
         fallback_writer_model: $fallbackWriterModel ? $fallbackWriterModel.value : "",
         rounds: parseInt($rounds.value, 10) || 3,
+        apply_prior_lessons: !!($applyPriorLessons && $applyPriorLessons.checked),
         system_prompt: $systemPrompt.value,
         temperature: parseFloat($temperature.value),
         max_tokens: parseInt($maxTokens.value, 10),

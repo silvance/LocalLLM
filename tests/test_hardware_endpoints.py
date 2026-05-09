@@ -272,6 +272,70 @@ def test_installed_models_caches_within_ttl(
     assert call_count["n"] == 1, "expected the cached list to be reused"
 
 
+def test_installed_models_failure_cache_expires_quickly(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """When the probe fails, the empty list must NOT be cached for the
+    full success-TTL — otherwise a transient hiccup at startup keeps
+    the unreachable banner stuck for ~30s after Ollama recovers.
+    Failure cache should expire in seconds, success cache in tens of
+    seconds."""
+    from app.web import app as web_app
+
+    assert (
+        web_app._INSTALLED_MODELS_FAILURE_TTL_S
+        < web_app._INSTALLED_MODELS_SUCCESS_TTL_S
+    )
+    # 5x ratio is a sanity check — the failure cache should self-heal
+    # noticeably faster than the success cache, not just shave a couple
+    # of seconds off.
+    assert (
+        web_app._INSTALLED_MODELS_FAILURE_TTL_S * 5
+        <= web_app._INSTALLED_MODELS_SUCCESS_TTL_S
+    )
+
+    web_app._invalidate_installed_models_cache()
+    call_count = {"n": 0}
+
+    # Simulate Ollama unreachable: python client raises, HTTP probe
+    # also raises. Probe should return [], cache that with the
+    # FAILURE TTL.
+    def _failing_list():
+        call_count["n"] += 1
+        raise OSError("WinError 10061: connection refused")
+
+    monkeypatch.setattr(
+        web_app.chat_service.adapters["granite"].client, "list", _failing_list,
+    )
+    monkeypatch.setattr(
+        "app.services.ollama_models.installed_names_or_raise",
+        lambda url: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+
+    out = web_app._ollama_installed_models()
+    assert out == []
+    first_calls = call_count["n"]
+
+    # A second call WITHIN the failure TTL window: cached, no extra
+    # client.list() invocation.
+    out = web_app._ollama_installed_models()
+    assert call_count["n"] == first_calls, "expected cache reuse within failure TTL"
+
+    # Advance monotonic past the failure TTL but well under the success
+    # TTL. The probe must run again (so the banner can clear quickly
+    # once Ollama is back), proving we're not using the success TTL.
+    real_monotonic = web_app.time.monotonic if hasattr(web_app, "time") else None
+    import time as _time
+    fake_now = _time.monotonic() + web_app._INSTALLED_MODELS_FAILURE_TTL_S + 0.5
+    monkeypatch.setattr(_time, "monotonic", lambda: fake_now)
+
+    out = web_app._ollama_installed_models()
+    assert call_count["n"] > first_calls, (
+        "failure cache must expire faster than success cache so the "
+        "unreachable banner clears soon after Ollama recovers"
+    )
+
+
 def test_installed_models_invalidate_after_successful_pull(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:

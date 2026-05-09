@@ -78,6 +78,13 @@ from app.services.review_gates import (
     gate_candidate_count,
     run_gates,
 )
+from app.services.continuity import (
+    find_prior_blockers,
+    load_durable_adrs,
+    render_adrs_for_prompt,
+    render_prior_lessons_for_writer,
+    write_sitrep,
+)
 from app.utils.outcomes_log import OutcomeLog, default_log_path, hash_prompt
 from app.services.reviewer_verdict import (
     SCHEMA_INSTRUCTION as REVIEWER_VERDICT_SCHEMA,
@@ -108,6 +115,13 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _CHATS_DIR = Path("data/chats")
 _REVIEWS_DIR = Path("data/reviews")
 _COMPARISONS_DIR = Path("data/comparisons")
+# Continuity layer (paper §2.2). Operator-curated ADRs live in
+# durable/; SITREPs and other auto-extracted candidates land in
+# proposed/. The Working Agent (writer + reviewer) reads from
+# durable/ only — never proposed/ — so an inferred-but-unconfirmed
+# rule cannot influence a future review without operator gating.
+_DURABLE_DIR = Path("data/durable")
+_PROPOSED_DIR = Path("data/proposed")
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 chat_service = ChatService()
@@ -749,6 +763,13 @@ async def start_review(request: Request) -> JSONResponse:
     temperature = body.get("temperature")
     max_tokens = body.get("max_tokens")
     num_ctx = body.get("num_ctx")
+    # Operator opt-in: surface blockers from prior runs of the same
+    # prompt hash as advisory hints in the writer's first prompt.
+    # Defaults to False because auto-injecting prior conclusions is
+    # exactly the cross-session context-poisoning vector the
+    # continuity paper warns about (§5). The operator must
+    # deliberately enable this per-run.
+    apply_prior_lessons = bool(body.get("apply_prior_lessons") or False)
 
     # Create the persisted review session up front so it shows up in the
     # sidebar immediately. The runner thread updates it as sections complete.
@@ -764,6 +785,7 @@ async def start_review(request: Request) -> JSONResponse:
             "reviewer_model": reviewer_model,
             "rounds": rounds,
             "prompt_chars": len(prompt),
+            "apply_prior_lessons": apply_prior_lessons,
         },
     )
     loop = asyncio.get_running_loop()
@@ -779,6 +801,7 @@ async def start_review(request: Request) -> JSONResponse:
         temperature=temperature,
         max_tokens=max_tokens,
         num_ctx=num_ctx,
+        apply_prior_lessons=apply_prior_lessons,
         loop=loop,
     )
     return JSONResponse({"job_id": job.id, "review_id": review_session.id})
@@ -820,6 +843,7 @@ def _start_review_thread(
     num_ctx: int | None,
     loop: asyncio.AbstractEventLoop,
     fallback_writer_model: str | None = None,
+    apply_prior_lessons: bool = False,
 ) -> None:
     def _persist(status: str, sections: list[dict]) -> None:
         """Save the current sections list to disk under the review session
@@ -1133,6 +1157,11 @@ def _start_review_thread(
                 review_id=review_id, writer=active_writer,
                 event="review_block" if verdict.blockers else "review_pass",
                 blocker_count=len(verdict.blockers) or None,
+                # Persist the blocker text so cross-session lookup
+                # (find_prior_blockers) can answer "have we seen this
+                # blocker on this prompt before?" without re-loading
+                # every saved review session.
+                blockers=list(verdict.blockers) if verdict.blockers else None,
                 prompt_hash=prompt_h,
             )
 
@@ -1223,10 +1252,17 @@ def _start_review_thread(
         def constrained_kickoff_message() -> str:
             """One-shot architecture-template rebuild prompt. Lists every
             reviewer blocker that's repeated past threshold as a hard
-            MUST NOT, plus structural constraints aimed at the BLE/Wi-Fi
-            failure modes that motivated this escalation: separate
-            backends per protocol, no Scapy on Wi-Fi monitor ifaces for
-            BLE, BLE via BlueZ tooling instead of pyshark/tshark.
+            MUST NOT, plus the operator's durable ADRs as structural
+            constraints (paper §2.2, §3 — files-are-truth, propose-
+            don't-promote).
+
+            Why ADR-driven instead of hardcoded rules: the BLE/Wi-Fi
+            constraints used to be inline Python strings, which meant
+            every new domain (USB capture, RF demod, Bluetooth Classic,
+            …) needed a code change to add rules. With ADRs the
+            operator drops a new markdown file in ``data/durable/`` and
+            the next review picks it up. The structural rules become
+            versioned, inspectable, and supersede-able.
 
             Why a separate prompt instead of just appending the blockers
             to the regular revise template: the writer keeps "fixing"
@@ -1234,7 +1270,16 @@ def _start_review_thread(
             existing code as the starting point. The constrained kickoff
             forbids the broken pattern explicitly and makes the writer
             re-architect from a hard-rule template."""
-            joined = "\n".join(f"- {b}" for b in repeated_blockers[-6:]) or "- (none recorded)"
+            joined_blockers = "\n".join(f"- {b}" for b in repeated_blockers[-6:]) or "- (none recorded)"
+            adrs_section = render_adrs_for_prompt(load_durable_adrs(_DURABLE_DIR))
+            structural_block = (
+                f"STRUCTURAL CONSTRAINTS — durable ADRs from "
+                f"`data/durable/`:\n\n{adrs_section}\n\n"
+                if adrs_section else
+                "STRUCTURAL CONSTRAINTS: (no durable ADRs found in "
+                "`data/durable/` — relying solely on the repeated-blocker "
+                "list above)\n\n"
+            )
             return (
                 f"ESCALATION: the same critical reviewer blocker has now "
                 f"appeared in {MAX_SAME_BLOCKER_REPEATS}+ separate rounds, "
@@ -1245,26 +1290,8 @@ def _start_review_thread(
                 f"violates any of them.\n\n"
                 f"Original user request:\n{prompt}\n\n"
                 f"HARD CONSTRAINTS — repeated reviewer blockers, MUST NOT "
-                f"recur:\n{joined}\n\n"
-                f"STRUCTURAL CONSTRAINTS:\n"
-                f"- If the task involves BOTH Wi-Fi and BLE: implement "
-                f"each protocol in a SEPARATE function / class / module. "
-                f"Do not share an interface, capture loop, or sniff() "
-                f"call across protocols.\n"
-                f"- BLE capture MUST use BlueZ tooling (`btmon`, "
-                f"`bluetoothctl --monitor`, mgmt-API, or "
-                f"`socket.AF_BLUETOOTH` HCI raw socket). Do NOT route "
-                f"BLE through `scapy.sniff()` or "
-                f"`pyshark.LiveCapture(interface=\"hci0\")` — "
-                f"neither path works on stock Linux without out-of-tree "
-                f"setup.\n"
-                f"- Wi-Fi capture goes on a monitor-mode 802.11 "
-                f"interface (`wlan0mon` / `mon0`) via "
-                f"`scapy.sniff(iface=...)`. NEVER pass a wlan/mon "
-                f"interface to a function that decodes BLE layers.\n"
-                f"- Real third-party deps (scapy, pyshark, bleak, "
-                f"bluetooth/pybluez) are FINE — assume they are "
-                f"installed. Do not invent module names.\n\n"
+                f"recur:\n{joined_blockers}\n\n"
+                f"{structural_block}"
                 f"OUTPUT FORMAT:\n"
                 f"- Return EXACTLY ONE fenced ```python ... ``` block.\n"
                 f"- No prose, no shell snippets outside the block.\n"
@@ -1305,9 +1332,71 @@ def _start_review_thread(
                 f"approach was wrong."
             )
 
+        def _emit_sitrep(outcome: str) -> None:
+            """End-of-session SITREP — paper §6 "propose, don't promote".
+            Writes a markdown summary to ``data/proposed/`` for the
+            operator to triage. Never blocks the review outcome: any
+            error (disk full, permissions, etc.) is logged and
+            swallowed so the user-visible status still reports
+            correctly."""
+            try:
+                # rounds_completed is the number of model turns we
+                # actually emitted (writer + reviewer + orchestrator
+                # notices). It's not the same as the input `rounds`
+                # cap — fewer is normal when the reviewer approves
+                # early or we abort.
+                rounds_completed = sum(
+                    1 for s in sections
+                    if s.get("role") in ("writer", "reviewer")
+                )
+                fallback_count = max(0, len(used_builders) - 1)
+                write_sitrep(
+                    proposed_dir=_PROPOSED_DIR,
+                    review_id=review_id,
+                    prompt=prompt,
+                    prompt_hash=hash_prompt(prompt),
+                    writer_models=list(used_builders),
+                    reviewer_model=reviewer_model,
+                    outcome=outcome,
+                    rounds_completed=rounds_completed,
+                    constrained_kickoff_used=constrained_kickoff_used,
+                    repeated_blockers=list(repeated_blockers),
+                    abort_reason=abort_reason,
+                    fallback_count=fallback_count,
+                )
+            except Exception:
+                logger.exception("Failed to write SITREP for review %s", review_id)
+
         try:
-            # Round 0 — writer produces initial code
-            writer_msgs = base_messages() + [ChatMessage(role="user", content=prompt)]
+            # Round 0 — writer produces initial code. If the operator
+            # opted into prior-session lessons, scan the outcomes log
+            # for blockers that recurred in prior runs of THIS prompt
+            # hash and prepend them as advisory hints. Always emitted
+            # as a separate `prior_lessons` section so the user can
+            # see exactly what got injected — paper §6 "observable
+            # injection" principle.
+            prior_lessons_text = ""
+            if apply_prior_lessons:
+                try:
+                    prior_blockers = find_prior_blockers(
+                        outcomes_log_path=outcomes_log.path,
+                        prompt_hash=hash_prompt(prompt),
+                        current_review_id=review_id,
+                    )
+                except Exception:
+                    logger.exception("find_prior_blockers failed (continuing without)")
+                    prior_blockers = []
+                if prior_blockers:
+                    prior_lessons_text = render_prior_lessons_for_writer(prior_blockers)
+                    _emit_inline_section(
+                        "prior_lessons", "(continuity)", prior_lessons_text,
+                    )
+
+            writer_user_content = (
+                f"{prior_lessons_text}\n\n---\n\n{prompt}"
+                if prior_lessons_text else prompt
+            )
+            writer_msgs = base_messages() + [ChatMessage(role="user", content=writer_user_content)]
             writer_text = run_section(role="writer", model=active_writer, messages=writer_msgs)
             sections.append({"role": "writer", "model": active_writer, "text": writer_text})
 
@@ -1404,6 +1493,7 @@ def _start_review_thread(
                     gate_or_review(sections[-1]["text"])
 
             _persist("done", sections)
+            _emit_sitrep("done")
             job_manager.finish(
                 job.id,
                 "done",
@@ -1412,6 +1502,7 @@ def _start_review_thread(
             )
         except _StopRequested as stop:
             _persist("stopped", sections)
+            _emit_sitrep("stopped")
             job_manager.finish(
                 job.id,
                 "stopped",
@@ -1426,6 +1517,7 @@ def _start_review_thread(
         except Exception as exc:
             logger.exception("Review job %s failed", job.id)
             _persist("error", sections)
+            _emit_sitrep("error")
             job_manager.finish(
                 job.id,
                 "error",
@@ -1455,7 +1547,14 @@ class _StopRequested(Exception):
 # endpoint invalidates explicitly on success so the new model shows
 # up immediately.
 _installed_models_cache: "tuple[float, list[str]] | None" = None
-_INSTALLED_MODELS_TTL_S = 30.0
+# Successful probe results stay cached for 30s — page nav round-trips
+# would otherwise hit /api/tags every render (the 5-10s lag bug). On
+# FAILURE we cache for only 2s so a transient hiccup at startup (Ollama
+# slow to bind, IPv6 timing, etc.) doesn't keep the unreachable banner
+# stuck for half a minute after the daemon recovers. 2s is enough to
+# debounce a hot reload loop without the user noticing.
+_INSTALLED_MODELS_SUCCESS_TTL_S = 30.0
+_INSTALLED_MODELS_FAILURE_TTL_S = 2.0
 # Last-known reachability state — populated alongside the model list
 # so templates can render a "can't reach Ollama" banner without
 # duplicating the discovery logic.
@@ -1507,7 +1606,15 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
     snapshot = _installed_models_cache
     if not force_refresh and snapshot is not None:
         ts, cached = snapshot
-        if time.monotonic() - ts < _INSTALLED_MODELS_TTL_S:
+        # Empty list means the previous probe failed — retry sooner so
+        # the unreachable banner clears as soon as Ollama is back. A
+        # populated list is a successful probe; cache it for the full
+        # TTL because re-probing on every page render is expensive.
+        ttl = (
+            _INSTALLED_MODELS_SUCCESS_TTL_S if cached
+            else _INSTALLED_MODELS_FAILURE_TTL_S
+        )
+        if time.monotonic() - ts < ttl:
             return cached
 
     base_url = chat_service.settings.ollama_host or "http://127.0.0.1:11434"

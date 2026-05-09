@@ -27,7 +27,15 @@ Thumbs.db
 .env.local
 
 # Local artifacts (RAG / models — populated later)
-data/
+# Default-ignore everything under data/ except the operator-curated
+# durable artifacts (ADRs etc.). User session state — chats/, reviews/,
+# comparisons/, the outcomes log, and the auto-generated proposed/
+# SITREP queue — stays out of the repo.
+data/*
+!data/durable/
+data/durable/*
+!data/durable/*.md
+!data/durable/README.md
 models/cache/
 *.gguf
 
