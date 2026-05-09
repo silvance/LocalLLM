@@ -37,6 +37,12 @@ class ReviewSession:
     rounds: int
     status: str = "pending"  # pending | done | stopped | error
     sections: list[ReviewSection] = field(default_factory=list)
+    # Comma-separated chain of fallback writer model names that the
+    # orchestrator will rotate to if the primary writer keeps failing.
+    # Persisted so reloading a review session shows the operator the
+    # actual config that was started, not "(none)" — UI used to silently
+    # reset this dropdown on every page load.
+    fallback_writer_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,7 +72,13 @@ def derive_title(prompt: str) -> str:
     return text
 
 
-def new_session(prompt: str, writer_model: str, reviewer_model: str, rounds: int) -> ReviewSession:
+def new_session(
+    prompt: str,
+    writer_model: str,
+    reviewer_model: str,
+    rounds: int,
+    fallback_writer_model: str | None = None,
+) -> ReviewSession:
     now = _now()
     return ReviewSession(
         id=str(uuid.uuid4()),
@@ -77,6 +89,7 @@ def new_session(prompt: str, writer_model: str, reviewer_model: str, rounds: int
         writer_model=writer_model,
         reviewer_model=reviewer_model,
         rounds=rounds,
+        fallback_writer_model=fallback_writer_model or None,
     )
 
 
@@ -125,6 +138,10 @@ class ReviewStorage:
             for s in (data.get("sections") or [])
             if isinstance(s, dict) and "role" in s and "model" in s
         ]
+        # ``fallback_writer_model`` was added later — pre-existing
+        # session files won't have it. Fall through to None and
+        # the UI degrades to "(none)" (which matches the prior
+        # behavior for those old sessions).
         return ReviewSession(
             id=str(data["id"]),
             title=str(data.get("title") or _TITLE_FALLBACK),
@@ -136,6 +153,7 @@ class ReviewStorage:
             rounds=int(data.get("rounds") or 0),
             status=str(data.get("status") or "pending"),
             sections=sections,
+            fallback_writer_model=str(data.get("fallback_writer_model") or "") or None,
         )
 
     def save(self, session: ReviewSession) -> None:

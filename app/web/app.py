@@ -773,7 +773,10 @@ async def start_review(request: Request) -> JSONResponse:
 
     # Create the persisted review session up front so it shows up in the
     # sidebar immediately. The runner thread updates it as sections complete.
-    review_session = new_review_session(prompt, writer_model, reviewer_model, rounds)
+    review_session = new_review_session(
+        prompt, writer_model, reviewer_model, rounds,
+        fallback_writer_model=fallback_writer_model,
+    )
     review_storage.save(review_session)
 
     job = job_manager.create(

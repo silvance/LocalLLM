@@ -269,10 +269,18 @@ def run_agent(
         messages.append(msg)
 
         text = (msg.get("content") or "").strip()
-        if text:
+        tool_calls = list(msg.get("tool_calls") or [])
+
+        # Emit model_text ONLY for intermediate reasoning (turns that
+        # also called tools). The FINAL turn's text is delivered via
+        # the `done` event's metadata.answer; emitting it here too
+        # would double-render the answer in the UI ("Reasoning: foo"
+        # + "Final answer: foo"). The user's iOS-vulnerabilities run
+        # showed exactly this — same paragraph appeared twice with a
+        # FINAL ANSWER tag separating them.
+        if text and tool_calls:
             emit("model_text", {"content": text})
 
-        tool_calls = list(msg.get("tool_calls") or [])
         if not tool_calls:
             final_answer = text
             break
@@ -336,7 +344,11 @@ def run_agent(
             synth_msg = dict(resp.get("message") or {})
             final_answer = (synth_msg.get("content") or "").strip()
             if final_answer:
-                emit("model_text", {"content": final_answer})
+                # Don't emit model_text for the synthesis answer — same
+                # double-render bug as the normal final-iteration path.
+                # The done event below carries the answer in metadata
+                # and the UI renders it as "Final answer (...)".
+                pass
             else:
                 # Even the synthesis turn came back empty. Surface a
                 # clear status so the UI can unlock and the operator

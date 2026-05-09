@@ -22,6 +22,46 @@
   let currentSection = null;  // DOM element for the in-progress section
   let lastSectionIndex = -1;  // Highest section_start index we've rendered (dedup)
 
+  // ---- per-tab settings persistence ----
+  // The fallback-writer dropdown silently reset to "(none)" whenever the
+  // operator tabbed away and came back to /review (the template renders a
+  // fresh page, and there's no `loaded` row when the URL has no review id).
+  // Cache the user's choice client-side so a tab-off doesn't lose it. The
+  // server-side ReviewSession also persists fallback_writer_model now —
+  // this localStorage path is the belt-and-suspenders for the
+  // before-the-review-is-submitted state.
+  const LS_KEY_FALLBACK = "localllm.review.fallbackWriterModel";
+
+  function rememberFallback() {
+    if (!$fallbackWriterModel) return;
+    try {
+      localStorage.setItem(LS_KEY_FALLBACK, $fallbackWriterModel.value || "");
+    } catch (_) { /* private mode / quota → ignore, no-op fallback */ }
+  }
+
+  function restoreFallback() {
+    if (!$fallbackWriterModel) return;
+    // Server-rendered `loaded.fallback_writer_model` wins — that's the
+    // authoritative value for an in-flight review. Only consult
+    // localStorage when the page is fresh (no loaded review).
+    const loadedVal = $fallbackWriterModel.dataset.loadedValue || "";
+    if (loadedVal) return;
+    try {
+      const saved = localStorage.getItem(LS_KEY_FALLBACK);
+      if (saved == null) return;
+      // Only restore if the saved option actually exists in the
+      // dropdown — model lists shift between sessions.
+      const opt = Array.from($fallbackWriterModel.options)
+        .find(o => o.value === saved);
+      if (opt) $fallbackWriterModel.value = saved;
+    } catch (_) { /* ignore */ }
+  }
+
+  if ($fallbackWriterModel) {
+    restoreFallback();
+    $fallbackWriterModel.addEventListener("change", rememberFallback);
+  }
+
   // ---- helpers (small subset of main.js so the page stands alone) ----
 
   function escapeHtml(s) {
