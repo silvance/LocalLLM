@@ -589,6 +589,208 @@ def test_review_routes_to_reviewer_when_only_known_dep_missing(
     assert "scapy" in reviewer_prompt
 
 
+def test_review_constrained_kickoff_loads_durable_adrs(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path,
+) -> None:
+    """The constrained-kickoff prompt must embed text from
+    ``data/durable/`` ADRs, not a hardcoded Python string. Operator
+    edits to an ADR show up on the next constrained round without a
+    code change."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    # Point the durable dir at a tmp_path with a custom marker phrase
+    # we can grep for in the writer's prompt — proves the prompt
+    # builder loaded our ADR rather than a hardcoded fallback.
+    durable_dir = tmp_path / "durable"
+    durable_dir.mkdir()
+    (durable_dir / "adr-test.md").write_text(
+        "---\n"
+        "id: adr-test\n"
+        "title: Distinct test marker\n"
+        "status: durable\n"
+        "---\n\n"
+        "MARKER_FOR_INTEGRATION_TEST_a8b3c1d2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web_app, "_DURABLE_DIR", durable_dir)
+
+    # Force the constrained-kickoff path: same blocker twice.
+    clean1 = "```python\ndef sniff(): pass\n```\n"
+    blocker = (
+        "issue\n\n```json\n"
+        '{"pass": false, "blockers": ["BLE on wlan0"], '
+        '"safe_to_rebuild": true, "recommended_next_action": "rebuild_same_writer"}\n```'
+    )
+    clean2 = "```python\ndef sniff2(): pass\n```\n"
+    extra = "```python\npass\n```\n"
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[
+        clean1, blocker, clean2, blocker, extra, blocker, extra,
+    ])
+
+    r = client.post("/api/review", json={
+        "prompt": "test prompt", "writer_model": "qwen",
+        "reviewer_model": "gemma", "rounds": 8,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 8.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    # The constrained-kickoff writer call must have received our ADR
+    # text in its user message. Anything else means the orchestrator
+    # is still using a hardcoded prompt.
+    constrained_calls = [
+        c for c in calls
+        if any("ESCALATION" in m.content for m in c["messages"])
+    ]
+    assert constrained_calls, "constrained kickoff never fired"
+    constrained_text = "\n".join(
+        m.content for m in constrained_calls[0]["messages"]
+    )
+    assert "MARKER_FOR_INTEGRATION_TEST_a8b3c1d2" in constrained_text, (
+        "ADR body did not appear in constrained-kickoff prompt — "
+        "orchestrator may have fallen back to a hardcoded template"
+    )
+    assert "Distinct test marker" in constrained_text
+
+
+def test_review_writes_sitrep_on_completion(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path,
+) -> None:
+    """End-of-session SITREP must land in ``data/proposed/`` so the
+    operator can triage it later. Provisional, never auto-promoted."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+    from app.services.continuity import parse_frontmatter
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+    proposed_dir = tmp_path / "proposed"
+    monkeypatch.setattr(web_app, "_PROPOSED_DIR", proposed_dir)
+
+    clean = "```python\ndef hi(): pass\n```\n"
+    review = "Looks fine."
+    _stub_chat_service(monkeypatch, scripted_outputs=[clean, review])
+
+    r = client.post("/api/review", json={
+        "prompt": "say hi", "writer_model": "qwen",
+        "reviewer_model": "gemma", "rounds": 2,
+    })
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 6.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    sitreps = list(proposed_dir.glob("sitrep-*.md"))
+    assert len(sitreps) == 1, f"expected one SITREP, got {sitreps}"
+    fm, body = parse_frontmatter(sitreps[0].read_text(encoding="utf-8"))
+    assert fm["review_id"] == review_id
+    assert fm["status"] == "provisional"
+    assert fm["outcome"] == "done"
+    assert fm["writer_models"] == ["qwen"]
+
+
+def test_review_apply_prior_lessons_injects_section(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, tmp_path: Path,
+) -> None:
+    """When the operator opts into prior-session lessons AND a prior
+    blocker exists in the outcomes log for the same prompt hash, a
+    visible ``prior_lessons`` section must appear before round 0 and
+    its text must reach the writer. When the operator opts OUT (the
+    default), nothing is injected even if the same prior data
+    exists — defaults must be safe."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+    from app.utils.outcomes_log import OutcomeLog
+    from app.utils.outcomes_log import hash_prompt as oh_hash
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+    log_path = tmp_path / "outcomes.jsonl"
+    web_app.outcomes_log = OutcomeLog(log_path)
+
+    prompt = "Build the same task again"
+    ph = oh_hash(prompt)
+
+    # Seed two prior sessions with the same blocker text on the same
+    # prompt hash.
+    web_app.outcomes_log.append(
+        review_id="prior-1", writer="qwen", event="review_block",
+        prompt_hash=ph, blockers=["DEADBEEF_PRIOR_BLOCKER_MARKER"],
+    )
+    web_app.outcomes_log.append(
+        review_id="prior-2", writer="granite", event="review_block",
+        prompt_hash=ph, blockers=["DEADBEEF_PRIOR_BLOCKER_MARKER"],
+    )
+
+    clean = "```python\ndef x(): pass\n```\n"
+    review = "Fine."
+
+    # First run: opt-in. Prior-lessons section MUST appear.
+    calls_in = _stub_chat_service(monkeypatch, scripted_outputs=[clean, review])
+    r = client.post("/api/review", json={
+        "prompt": prompt, "writer_model": "qwen", "reviewer_model": "gemma",
+        "rounds": 2, "apply_prior_lessons": True,
+    })
+    rid_in = r.json()["review_id"]
+    deadline = time.monotonic() + 6.0
+    saved_in = None
+    while time.monotonic() < deadline:
+        saved_in = web_app.review_storage.load(rid_in)
+        if saved_in and saved_in.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved_in is not None and saved_in.status == "done"
+    roles_in = [s.role for s in saved_in.sections]
+    assert "prior_lessons" in roles_in, (
+        f"opt-in run missing prior_lessons section; roles: {roles_in}"
+    )
+    # The marker must reach the writer's user message too — the
+    # section is observable, but the prompt is what changes behavior.
+    writer_user_text = "\n".join(
+        m.content for c in calls_in if c["selection"] == "qwen"
+        for m in c["messages"] if m.role == "user"
+    )
+    # Match case-insensitively because find_prior_blockers normalizes
+    # via casefold for stable cross-session keys.
+    assert "deadbeef_prior_blocker_marker" in writer_user_text.lower()
+
+    # Second run: opt-out (default). Same log entries; must NOT inject.
+    calls_out = _stub_chat_service(monkeypatch, scripted_outputs=[clean, review])
+    r = client.post("/api/review", json={
+        "prompt": prompt, "writer_model": "qwen", "reviewer_model": "gemma",
+        "rounds": 2,
+        # apply_prior_lessons omitted → defaults to False.
+    })
+    rid_out = r.json()["review_id"]
+    deadline = time.monotonic() + 6.0
+    saved_out = None
+    while time.monotonic() < deadline:
+        saved_out = web_app.review_storage.load(rid_out)
+        if saved_out and saved_out.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved_out is not None and saved_out.status == "done"
+    roles_out = [s.role for s in saved_out.sections]
+    assert "prior_lessons" not in roles_out, (
+        f"opt-out run leaked prior_lessons; roles: {roles_out}"
+    )
+
+
 def test_review_repeated_blocker_triggers_constrained_kickoff(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:

@@ -78,6 +78,18 @@
         <input type="number" id="rounds" min="2" max="12" value="{{ loaded.rounds if loaded else 10 }}">
       </label>
 
+      <label class="checkbox-row" style="display:flex;align-items:flex-start;gap:0.4rem;">
+        <input type="checkbox" id="apply-prior-lessons" style="margin-top:0.25rem;">
+        <span>
+          Apply prior-session lessons
+          <span class="muted-note" style="display:block;font-size:0.7rem;">
+            Surface reviewer blockers from earlier runs of this exact prompt
+            as advisory hints. Off by default — auto-injecting prior conclusions
+            risks cross-session context poisoning.
+          </span>
+        </span>
+      </label>
+
       <h2>Settings</h2>
       <label>
         System prompt (optional)

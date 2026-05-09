@@ -117,6 +117,7 @@ class OutcomeLog:
         prompt_hash: str,
         gate: str | None = None,
         blocker_count: int | None = None,
+        blockers: list[str] | None = None,
         detail: str | None = None,
     ) -> None:
         if event not in EVENT_TYPES:
@@ -133,6 +134,13 @@ class OutcomeLog:
             row["gate"] = gate
         if blocker_count is not None:
             row["blocker_count"] = blocker_count
+        if blockers:
+            # Cap per-blocker length so a verbose reviewer can't bloat
+            # the log line past line-buffered atomic write limits, and
+            # cap list length so we don't persist 100-blocker reviews
+            # in full. The cross-session lookup only needs a stable
+            # key per blocker, not the full prose.
+            row["blockers"] = [str(b)[:300] for b in blockers[:20]]
         if detail is not None:
             row["detail"] = detail[:200]
         line = json.dumps(row, ensure_ascii=False)
