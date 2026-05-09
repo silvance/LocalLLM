@@ -35,6 +35,8 @@ def test_candidate_count_passes_on_single_python_block() -> None:
     )
     r = gate_candidate_count(text)
     assert r.passed is True
+    assert r.status == "pass"
+    assert r.severity == "info"
 
 
 def test_candidate_count_fails_when_no_python_block() -> None:
@@ -46,6 +48,8 @@ def test_candidate_count_fails_when_no_python_block() -> None:
     )
     r = gate_candidate_count(text)
     assert r.passed is False
+    assert r.status == "fail"
+    assert r.failure_type == "no_candidate"
     assert "no_candidate" in r.messages[0]
     # Message must talk about fence syntax, not 'syntax error'.
     assert "```python" in r.messages[0]
@@ -58,6 +62,7 @@ def test_candidate_count_fails_on_multiple_python_blocks() -> None:
     )
     r = gate_candidate_count(text)
     assert r.passed is False
+    assert r.failure_type == "multiple_candidates"
     assert "multiple_candidates" in r.messages[0]
     assert "2 python code blocks" in r.messages[0]
 
@@ -66,6 +71,25 @@ def test_candidate_count_handles_empty_input() -> None:
     r = gate_candidate_count("")
     assert r.passed is False
     assert "no_candidate" in r.messages[0]
+
+
+def test_candidate_count_rejects_transcript_markers_inside_code() -> None:
+    text = (
+        "```python\n"
+        "# Static Analysis:\n"
+        "print('not just code')\n"
+        "```\n"
+    )
+    r = gate_candidate_count(text)
+    assert r.passed is False
+    assert r.failure_type == "duplicate_output"
+    assert "Static Analysis" in r.messages[0]
+
+
+def test_candidate_count_rejects_unclosed_python_fence() -> None:
+    r = gate_candidate_count("```python\nprint('oops')\n")
+    assert r.passed is False
+    assert r.failure_type == "invalid_fence"
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +274,8 @@ def test_gate_imports_marks_known_dep_as_blocked(
     r = gate_imports("import scapy\n")
     assert r.passed is False
     assert r.blocked is True
+    assert r.status == "blocked"
+    assert r.severity == "warning"
     assert r.failure_type == "missing_known_dependency"
     assert r.is_terminal_failure is False, "blocked must NOT count as terminal"
 
@@ -418,6 +444,7 @@ def test_protocol_mismatch_flags_btle_with_wlan0mon() -> None:
     r = gate_protocol_interface_mismatch(code)
     assert r.passed is False
     assert r.failure_type == "protocol_interface_mismatch"
+    assert r.severity == "critical"
     assert any("protocol_interface_mismatch" in m for m in r.messages)
     assert any("wlan0mon" in m for m in r.messages)
 

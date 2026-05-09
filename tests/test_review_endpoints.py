@@ -791,6 +791,47 @@ def test_review_apply_prior_lessons_injects_section(
     )
 
 
+def test_initial_writer_receives_ble_wifi_trap_card(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """Trap cards must be injected before the first writer pass, not
+    only after the reviewer catches the failure."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+    code = "```python\ndef main():\n    return None\n```\n"
+    review = (
+        "Looks fine.\n\n```json\n"
+        '{"pass": true, "blockers": [], "safe_to_rebuild": true, '
+        '"recommended_next_action": "approve"}\n```'
+    )
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[code, review])
+
+    r = client.post("/api/review", json={
+        "prompt": "Build a quick BLE/Wi-Fi sniffer using a Raspberry Pi 4 Model B.",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "rounds": 2,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    first_writer_prompt = "\n".join(m.content for m in calls[0]["messages"])
+    assert "Trap card: wireless_ble_wifi_linux_sbc" in first_writer_prompt
+    assert "Do not capture BLE from wlan0" in first_writer_prompt
+    assert "Use separate Wi-Fi and BLE backends" in first_writer_prompt
+
+
 def test_review_repeated_blocker_triggers_constrained_kickoff(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:

@@ -54,6 +54,19 @@ def test_parse_rebuild_different_writer_passthrough() -> None:
     )
     v = parse(text)
     assert v.next_action == "rebuild_different_writer"
+    assert v.blocker_categories == ["protocol_interface_mismatch"]
+
+
+def test_parse_accepts_explicit_blocker_categories() -> None:
+    text = (
+        "```json\n"
+        '{"pass": false, "blockers": ["uses fake BLE packets"], '
+        '"blocker_categories": ["fake_implementation"], '
+        '"safe_to_rebuild": true, '
+        '"recommended_next_action": "rebuild_different_writer"}\n```'
+    )
+    v = parse(text)
+    assert v.blocker_categories == ["fake_implementation"]
 
 
 def test_parse_abort_when_unsalvageable() -> None:
@@ -209,3 +222,4 @@ def test_reviewer_verdict_dataclass_fields_default_safe() -> None:
     assert v.next_action == "rebuild_same_writer"
     assert v.safe_to_rebuild is True
     assert v.blockers == []
+    assert v.blocker_categories == []
