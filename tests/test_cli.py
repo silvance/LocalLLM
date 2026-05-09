@@ -139,3 +139,89 @@ def test_main_help_returns_0(capsys: pytest.CaptureFixture[str]) -> None:
     assert rc == 0
     out = capsys.readouterr().out
     assert "Subcommands:" in out
+
+
+# ---------------------------------------------------------------------------
+# _ensure_port_free — pre-bind probe with a friendly error message
+# ---------------------------------------------------------------------------
+
+def test_ensure_port_free_returns_zero_on_unbound_port() -> None:
+    """Picking an obviously-free port — kernel hands one back via
+    bind(0) — must produce no error. Regression guard against a
+    paranoid implementation that declares everything taken."""
+    import socket as _s
+    from app.cli import _ensure_port_free
+
+    # Find a port that's free RIGHT NOW. Don't bind — just ask
+    # the kernel for one and immediately release it; then the
+    # check should still see it as free in the next instant.
+    with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+
+    rc = _ensure_port_free("127.0.0.1", free_port)
+    assert rc == 0
+
+
+def test_ensure_port_free_reports_conflict_and_suggests_fixes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When the port is already bound, exit non-zero and the error
+    message must name the conflicting PID, the kill command, and
+    the alternative-port fix. Regression guard for the operator
+    experience the user got bitten by — uvicorn's misleading
+    "Application startup complete" before bind failure."""
+    import socket as _s
+    from app.cli import _ensure_port_free
+
+    # Hold the port for real so the probe sees a genuine conflict.
+    with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+
+        rc = _ensure_port_free("127.0.0.1", port)
+
+    assert rc != 0, "expected non-zero exit when port is held"
+    err = capsys.readouterr().err
+    # Operator-facing message MUST contain the offending port + the
+    # essentials of the fix path. Substring checks so wording can
+    # drift without breaking the test.
+    assert f":{port}" in err, "error must name the conflicting port"
+    assert "PID" in err or "another process" in err
+    assert "--port" in err, "must suggest the alternative-port flag"
+    # Both Windows and POSIX guidance should appear so the message
+    # works for the user regardless of platform.
+    assert "Get-NetTCPConnection" in err
+    assert "lsof" in err
+
+
+def test_ensure_port_free_handles_missing_psutil(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``_find_pid_on_port`` must degrade gracefully when psutil is
+    absent — we still print a usable error, just without a PID. The
+    bundled binary path includes psutil, but a developer install or
+    a stripped airgap bundle might not, and we don't want the
+    helpful-error feature to crash the conflict detection."""
+    import sys as _sys
+    import socket as _s
+    from app.cli import _ensure_port_free
+
+    # Hide psutil so _find_pid_on_port falls into the ImportError
+    # branch (returns None → message says "another process").
+    monkeypatch.setitem(_sys.modules, "psutil", None)
+
+    with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+
+        rc = _ensure_port_free("127.0.0.1", port)
+
+    assert rc != 0
+    err = capsys.readouterr().err
+    # Without psutil we still report the port + the fix paths.
+    assert f":{port}" in err
+    assert "--port" in err

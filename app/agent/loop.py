@@ -96,6 +96,12 @@ version that ships frequently):
 - Before citing a source, check its `published_at`. Anything older
   than ~12 months for a recency-sensitive question is potentially
   STALE and must NOT be presented as describing the current state.
+- **DO NOT FETCH stale results.** When `published_at` shows the
+  result is more than ~12 months old for a recency-sensitive query,
+  skip it. Picking the most recent results to fetch is the single
+  most effective thing you can do — wasting a tool call on a
+  guaranteed-stale page eats the budget you need to find current
+  data and to write a final answer.
 - If your top search hits are all stale, run the search AGAIN with a
   year qualifier (e.g. append "{year}" or "{prev_year}") or a more
   specific query. Don't settle for the first plausible-sounding hit.
@@ -112,6 +118,8 @@ version that ships frequently):
   * Quoting CVE numbers from a 2023 patch round when asked about
     "current" vulnerabilities for software released in 2026.
   * Treating "latest version" claims in old articles as still true.
+  * Fetching a 2020-dated article when you already see a 2026-dated
+    one in the same search results.
 
 Constraints:
 - At most ~5 tool calls. Do not loop on the same query.
@@ -121,6 +129,11 @@ Constraints:
   not recency-sensitive, you may skip the tools and answer. For
   anything time-sensitive, search the web — your training data is
   too stale to trust.
+- **Reserve budget for the final answer.** You have a hard limit on
+  tool calls. Use roughly half on gathering, then synthesize. After
+  2-3 fetches, decide whether you have enough to answer; if yes,
+  stop fetching and write the answer. Tool calls that don't move
+  you toward an answer are worse than no tool call at all.
 
 CRITICAL — when tools return an error:
 - Tool results that look like {{"error": "..."}} mean the tool DID NOT WORK
@@ -235,6 +248,7 @@ def run_agent(
     ]
 
     final_answer = ""
+    capped_without_answer = False
 
     iteration = 0
     for iteration in range(max_iterations):
@@ -285,8 +299,67 @@ def run_agent(
                 })
                 emit("tool_error", {"name": name, "error": err})
     else:
-        # Loop hit max_iterations without a final answer
-        emit("error", {"error": f"agent stopped after {max_iterations} iterations without a final answer"})
+        # Loop hit max_iterations without a final answer. Don't just
+        # emit "error" + done="" — the user is left with whatever
+        # mid-stream text was last shown and no actionable answer,
+        # and the input stays locked because the job didn't reach
+        # `done` with content. Force one final SYNTHESIS turn with
+        # tools=None: the model can't loop further, MUST produce a
+        # text response, and the response goes back to the user as
+        # the answer-of-last-resort.
+        capped_without_answer = True
+        emit("model_text", {
+            "content": (
+                "(out of tool budget — synthesizing a final answer "
+                "from what was gathered so far …)"
+            ),
+        })
+        synthesis_instruction = (
+            f"You have used all {max_iterations} tool-call rounds. "
+            f"NO MORE TOOL CALLS — produce the FINAL ANSWER right now "
+            f"based on whatever data was returned in this conversation. "
+            f"Cite the sources you actually fetched (with their dates "
+            f"when known). If the data is incomplete, say so and "
+            f"explain what's missing. Do NOT fabricate facts to fill "
+            f"gaps. A short partial answer is better than nothing."
+        )
+        messages.append({"role": "user", "content": synthesis_instruction})
+        try:
+            resp = chat_client.chat(
+                model=model,
+                messages=messages,
+                # tools omitted — Ollama treats absent / None as "no
+                # tools available," so the model can't trigger
+                # another fetch loop here.
+                stream=False,
+            )
+            synth_msg = dict(resp.get("message") or {})
+            final_answer = (synth_msg.get("content") or "").strip()
+            if final_answer:
+                emit("model_text", {"content": final_answer})
+            else:
+                # Even the synthesis turn came back empty. Surface a
+                # clear status so the UI can unlock and the operator
+                # can retry with a stronger model / different query.
+                emit("error", {
+                    "error": (
+                        f"agent ran out of budget after {max_iterations} "
+                        f"iterations and the synthesis turn returned "
+                        f"empty content"
+                    ),
+                })
+        except Exception as exc:
+            logger.exception("Synthesis turn failed")
+            emit("error", {
+                "error": (
+                    f"agent ran out of budget after {max_iterations} "
+                    f"iterations and the synthesis turn raised: {exc}"
+                ),
+            })
 
-    emit("done", {"iterations": iteration + 1, "answer": final_answer})
+    emit("done", {
+        "iterations": iteration + 1,
+        "answer": final_answer,
+        "capped": capped_without_answer,
+    })
     return final_answer
