@@ -11,6 +11,7 @@ import pytest
 from app.agent.loop import (
     SYSTEM_PROMPT,
     TOOL_SCHEMAS,
+    _build_system_prompt,
     _coerce_args,
     run_agent,
 )
@@ -194,3 +195,71 @@ def test_run_agent_handles_string_args_from_some_models() -> None:
     with patch("app.agent.loop._execute_tool", side_effect=fake_execute):
         run_agent("x", chat_client=client, model="granite")
     assert captured == [{"query": "ok", "max_results": 3}]
+
+
+# ---------------------------------------------------------------------------
+# Recency discipline — date awareness in the system prompt
+# ---------------------------------------------------------------------------
+
+def test_build_system_prompt_injects_today_and_year() -> None:
+    """The agent has to know what 'current' means. Pin the date to a
+    fixed value and assert it shows up in the prompt — both as the
+    full ISO date and as bare year qualifiers in the search-fallback
+    instruction."""
+    p = _build_system_prompt("2026-05-09")
+    assert "Today's date is 2026-05-09" in p
+    assert "current calendar year is 2026" in p
+    # Year + previous-year qualifiers used by the "search again with
+    # a year qualifier" follow-up rule.
+    assert "\"2026\"" in p
+    assert "\"2025\"" in p
+
+
+def test_system_prompt_contains_recency_discipline_section() -> None:
+    """Catch a regression where someone strips the recency rules
+    while editing the prompt for an unrelated reason. The exact
+    section heading is the load-bearing token — searches for it in
+    docs / changelogs / future code reviews."""
+    p = _build_system_prompt("2026-05-09")
+    assert "RECENCY DISCIPLINE" in p
+    # Hard rules the model must learn — pin the most important
+    # phrasings so paraphrase drift gets flagged.
+    assert "potentially" in p.lower() and "stale" in p.lower()
+    assert "year qualifier" in p.lower()
+    assert "publication date" in p.lower() or "published_at" in p
+
+
+def test_run_agent_renders_today_at_call_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner must call _build_system_prompt() each invocation so
+    a long-lived server doesn't tell the model an out-of-date today.
+    Imports happen once; runs happen continuously."""
+    rendered: list[str] = []
+    real_build = _build_system_prompt
+
+    def spy(today_iso: str | None = None) -> str:
+        out = real_build(today_iso)
+        rendered.append(out)
+        return out
+
+    monkeypatch.setattr("app.agent.loop._build_system_prompt", spy)
+    client = FakeChatClient([{"role": "assistant", "content": "Done."}])
+    run_agent("x", chat_client=client, model="granite")
+    # _build_system_prompt is called once during run_agent invocation.
+    # If a future refactor caches the prompt at import, this fails
+    # (rendered would be empty) and the failing test points at the
+    # date-drift bug for whoever inherits it.
+    assert len(rendered) == 1
+
+
+def test_system_prompt_documents_published_at_field() -> None:
+    """The model needs to know `published_at` exists in tool results.
+    Without that, even with date data in hand the model has nothing
+    to consult."""
+    p = _build_system_prompt("2026-05-09")
+    assert "published_at" in p
+    # web_search and http_fetch must both be advertised as
+    # date-aware so the model uses both signals.
+    web_block = p[p.index("web_search"):p.index("http_fetch")]
+    fetch_block = p[p.index("http_fetch"):p.index("Strategy:")]
+    assert "published_at" in web_block
+    assert "published_at" in fetch_block
