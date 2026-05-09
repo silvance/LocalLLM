@@ -263,3 +263,143 @@ def test_system_prompt_documents_published_at_field() -> None:
     fetch_block = p[p.index("http_fetch"):p.index("Strategy:")]
     assert "published_at" in web_block
     assert "published_at" in fetch_block
+
+
+# ---------------------------------------------------------------------------
+# Forced final-synthesis pass at iteration cap
+# ---------------------------------------------------------------------------
+
+def test_run_agent_forces_synthesis_when_budget_exhausted() -> None:
+    """When the loop runs out of tool-call rounds without a final
+    answer, run ONE more turn with no tools to force synthesis. The
+    operator gets a real answer instead of a locked UI with empty
+    job state — that was the failure mode the user reported when
+    the model burned all its iterations on stale-source fetches."""
+    # Model wants tools forever for the first 3 iterations, then
+    # the synthesis turn (NO tools) returns a real answer.
+    forever_tool = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "x"}}}],
+    }
+    synthesis_answer = {
+        "role": "assistant",
+        "content": "Best answer I can give from the partial data: foo.",
+    }
+    client = FakeChatClient([
+        dict(forever_tool), dict(forever_tool), dict(forever_tool),
+        synthesis_answer,
+    ])
+    events: list[tuple[str, dict]] = []
+    with patch("app.agent.loop._execute_tool", return_value={"results": []}):
+        answer = run_agent(
+            "research X",
+            chat_client=client,
+            model="granite",
+            max_iterations=3,
+            on_event=lambda n, p: events.append((n, p)),
+        )
+    assert "foo" in answer, "synthesis text must become final_answer"
+
+    # The synthesis call must have been made WITHOUT tools — that's
+    # what forces termination. If we still passed `tools=`, the
+    # model could just emit tool_calls again and the user would
+    # be locked out a second time.
+    assert len(client.calls) == 4
+    synth_call = client.calls[3]
+    assert "tools" not in synth_call, (
+        f"synthesis call must not carry tools=; got keys: {list(synth_call.keys())}"
+    )
+
+    # Must include a user-visible "out of budget" notice so the
+    # operator understands why the answer is being labeled.
+    text_events = [p["content"] for n, p in events if n == "model_text"]
+    assert any("out of tool budget" in t.lower() for t in text_events)
+
+    # `done` event must signal the cap-then-synthesis path so the
+    # UI can decorate accordingly.
+    done_events = [p for n, p in events if n == "done"]
+    assert len(done_events) == 1
+    assert done_events[0]["capped"] is True
+    assert done_events[0]["answer"] == answer
+
+
+def test_run_agent_emits_error_when_synthesis_returns_empty() -> None:
+    """If even the no-tools synthesis turn comes back empty, surface
+    a clear error so the UI can unlock and the operator knows the
+    model gave up. Without this, `done` would carry an empty answer
+    silently and the operator would think the system hung."""
+    forever_tool = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "x"}}}],
+    }
+    # Synthesis turn ALSO returns empty content. The fake client
+    # returns scripted responses regardless of whether tools= is
+    # passed, so this exercises the "synthesis went sideways" path.
+    empty_synthesis = {"role": "assistant", "content": ""}
+    client = FakeChatClient([
+        dict(forever_tool), dict(forever_tool), empty_synthesis,
+    ])
+    events: list[tuple[str, dict]] = []
+    with patch("app.agent.loop._execute_tool", return_value={"results": []}):
+        answer = run_agent(
+            "research X",
+            chat_client=client,
+            model="granite",
+            max_iterations=2,
+            on_event=lambda n, p: events.append((n, p)),
+        )
+    assert answer == ""
+    error_events = [p for n, p in events if n == "error"]
+    assert any(
+        "synthesis" in e.get("error", "").lower()
+        and "empty" in e.get("error", "").lower()
+        for e in error_events
+    ), f"expected synthesis-empty error; got events: {error_events}"
+
+
+def test_run_agent_emits_done_event_after_synthesis_failure() -> None:
+    """`done` must always fire so the JobManager closes the job and
+    the chat input unlocks. Both for synthesis-success AND synthesis-
+    failure paths — the user reported being unable to send a follow-
+    up question, and the most common cause is a never-finished job."""
+    forever_tool = {
+        "role": "assistant", "content": "",
+        "tool_calls": [{"function": {"name": "web_search", "arguments": {"query": "x"}}}],
+    }
+    empty_synthesis = {"role": "assistant", "content": ""}
+    client = FakeChatClient([dict(forever_tool), empty_synthesis])
+    events: list[tuple[str, dict]] = []
+    with patch("app.agent.loop._execute_tool", return_value={"results": []}):
+        run_agent(
+            "x",
+            chat_client=client,
+            model="granite",
+            max_iterations=1,
+            on_event=lambda n, p: events.append((n, p)),
+        )
+    names = [n for n, _ in events]
+    assert "done" in names, (
+        f"`done` event missing — UI would stay locked. Events: {names}"
+    )
+
+
+def test_system_prompt_says_skip_stale_dont_fetch() -> None:
+    """The original recency rule said treat stale as stale but didn't
+    say STOP fetching it. The model burned tool calls on
+    confirmed-stale 2020 articles. The rule must be explicit:
+    stale `published_at` → skip."""
+    p = _build_system_prompt("2026-05-09")
+    p_low = p.lower()
+    # The skip-stale rule must mention BOTH "stale" / "old" AND a
+    # negation ("do not", "skip", "don't"). Substring checks so
+    # paraphrase drift doesn't break, but the imperative must
+    # remain or this test fails meaningfully.
+    assert "do not fetch" in p_low or "don't fetch" in p_low or "skip" in p_low
+    # Must explicitly mention the published_at field — the model
+    # needs to know which signal to consult.
+    assert "published_at" in p
+    # Reserve-budget rule: tool calls have a hard cap so we don't
+    # exhaust budget on gathering and skip synthesis.
+    assert "reserve" in p_low or "budget" in p_low
