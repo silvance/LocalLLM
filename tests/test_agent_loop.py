@@ -471,3 +471,102 @@ def test_intermediate_reasoning_still_emits_model_text() -> None:
     )
     # Final answer text must NOT also appear as model_text.
     assert "Found it." not in text_events
+
+
+# ---------------------------------------------------------------------------
+# Grounding check — strict-mode refusal when the model invents claims
+# ---------------------------------------------------------------------------
+
+def test_run_agent_strict_mode_refuses_fabricated_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a tool-call run where the agent fabricates CVE
+    IDs and source URLs that weren't in any tool result. Strict
+    mode must REPLACE the final answer with a refusal, and the
+    `done` event must carry that refusal — NOT the original
+    fabricated text."""
+    monkeypatch.setenv("LOCALLLM_AGENT_VERIFY_MODE", "strict")
+    client = FakeChatClient([
+        # Iter 0: search
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"function": {"name": "web_search",
+                                          "arguments": {"query": "ios cve"}}}],
+        },
+        # Iter 1: model produces a confidently-wrong final answer
+        # citing a CVE and URL that DON'T appear in any tool result.
+        {
+            "role": "assistant",
+            "content": (
+                "Current iOS vulns include CVE-2099-99999 per "
+                "https://totally-fake-cve-site.example.org/page."
+            ),
+        },
+    ])
+    fake_search = {"results": [
+        {"url": "https://thehackernews.com/real-article",
+         "snippet": "real CVE-2024-1 was patched"},
+    ]}
+    events: list[tuple[str, dict]] = []
+
+    def _exec(name: str, args: dict) -> dict:
+        # web_search returns the fake_search; nothing else gets called
+        return fake_search if name == "web_search" else {}
+
+    with patch("app.agent.loop._execute_tool", side_effect=_exec):
+        answer = run_agent(
+            "research ios",
+            chat_client=client,
+            model="granite",
+            on_event=lambda n, p: events.append((n, p)),
+        )
+
+    # The fabricated answer MUST NOT reach the user.
+    assert "CVE-2099-99999" not in answer or "rejected" in answer.lower(), (
+        "strict mode failed to refuse fabricated CVE — answer was: " + answer
+    )
+    assert "rejected" in answer.lower() or "unverified" in answer.lower(), (
+        f"expected refusal-shaped answer; got: {answer[:200]!r}"
+    )
+    # And the orchestrator must emit a `verification` event so the
+    # UI / operator can see what was flagged.
+    verification_events = [p for n, p in events if n == "verification"]
+    assert verification_events, "no verification event emitted"
+    v = verification_events[0]
+    assert "CVE-2099-99999" in v["unverified_cves"]
+    assert any("totally-fake-cve-site" in u for u in v["unverified_urls"])
+
+
+def test_run_agent_strict_mode_passes_clean_answer_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every claim is verifiable, the answer reaches the user
+    unchanged AND no `verification` event fires (we only emit on
+    unverified-detection). Regression guard against the check
+    rewriting clean answers."""
+    monkeypatch.setenv("LOCALLLM_AGENT_VERIFY_MODE", "strict")
+    client = FakeChatClient([
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"function": {"name": "web_search",
+                                          "arguments": {"query": "x"}}}],
+        },
+        {
+            "role": "assistant",
+            "content": "Patched in CVE-2024-1 per https://real.com/article.",
+        },
+    ])
+    fake_search = {"results": [
+        {"url": "https://real.com/article", "snippet": "CVE-2024-1 patched"},
+    ]}
+    events: list[tuple[str, dict]] = []
+    with patch("app.agent.loop._execute_tool", return_value=fake_search):
+        answer = run_agent(
+            "x", chat_client=client, model="granite",
+            on_event=lambda n, p: events.append((n, p)),
+        )
+    assert "CVE-2024-1" in answer
+    assert "real.com/article" in answer
+    assert "rejected" not in answer.lower()
+    # No verification event when nothing is unverified.
+    assert not [p for n, p in events if n == "verification"]

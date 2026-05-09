@@ -250,6 +250,20 @@ def run_agent(
     final_answer = ""
     capped_without_answer = False
 
+    # Verified-sources accumulator for the post-generation grounding
+    # check. Each successful tool call deposits its URLs / body text
+    # here; before we emit `done`, we cross-check the model's
+    # extracted claims (URLs + CVE IDs) against this set and either
+    # refuse or annotate per LOCALLLM_AGENT_VERIFY_MODE. Three
+    # layers of system prompt did NOT stop the model from inventing
+    # confident-looking CVEs and source URLs in real runs — this is
+    # the deterministic backstop.
+    from app.agent.grounding import (
+        VerifiedSources, add_search_result, add_fetch_result,
+        apply_verification,
+    )
+    verified_sources = VerifiedSources()
+
     iteration = 0
     for iteration in range(max_iterations):
         emit("step_start", {"iteration": iteration})
@@ -298,6 +312,15 @@ def run_agent(
                     "content": json.dumps(result, ensure_ascii=False),
                 })
                 emit("tool_result", {"name": name, "result": result})
+                # Fold the result into the verified-sources corpus
+                # for the post-generation grounding check. Failures
+                # are skipped (they're surfaced via tool_error and
+                # the user already sees them) — only successful
+                # tool calls contribute ground truth.
+                if name == "web_search":
+                    add_search_result(verified_sources, result)
+                elif name == "http_fetch":
+                    add_fetch_result(verified_sources, result)
             except Exception as exc:
                 err = str(exc)
                 logger.exception("Tool %s failed", name)
@@ -368,6 +391,34 @@ def run_agent(
                     f"iterations and the synthesis turn raised: {exc}"
                 ),
             })
+
+    # Grounding check — runs unconditionally on the final answer.
+    # In `strict` mode (default) an unverified citation REPLACES the
+    # answer with a refusal so the operator can't accidentally trust
+    # confident-looking fabrication. In `annotate` mode the answer
+    # is kept with `[unverified]` tags inline. In `off` mode the
+    # call is a no-op. Emits a `verification` event regardless so
+    # the UI / operator can see what was checked.
+    verification_result = None
+    if final_answer:
+        try:
+            new_answer, verification_result = apply_verification(
+                final_answer, verified_sources,
+            )
+            final_answer = new_answer
+        except Exception as exc:
+            # Verification must NEVER break the agent — log and skip.
+            # Operator gets the unverified answer in that case (which
+            # is no worse than the pre-verification status quo).
+            logger.exception("Grounding verification failed (skipping)")
+
+    if verification_result is not None and verification_result.has_unverified:
+        emit("verification", {
+            "unverified_urls": verification_result.unverified_urls,
+            "unverified_cves": verification_result.unverified_cves,
+            "verified_urls": verification_result.verified_urls,
+            "verified_cves": verification_result.verified_cves,
+        })
 
     emit("done", {
         "iterations": iteration + 1,
