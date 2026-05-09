@@ -25,11 +25,16 @@ from dataclasses import dataclass
 from pyflakes import checker as _flakes_checker
 
 
-# Python code fenced blocks. Treat absent language tag as Python too,
-# since some models forget the hint after the first block.
+# Python code fenced blocks. Must be `python` or `py` — we used to also
+# accept an empty language tag for models that forgot the hint after
+# the first block, but that turned out to false-match the closing
+# fence of one bash block + prose + opening fence of the next as a
+# "Python block." Rather than accept that risk, require explicit
+# python/py and anchor to start-of-line so accidental triple-backticks
+# inside code (rare) can't confuse us.
 _FENCE_PY = re.compile(
-    r"```(?:python|py|)\r?\n([\s\S]*?)```",
-    re.IGNORECASE,
+    r"^```(?:python|py)\s*\r?\n([\s\S]*?)^```\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 

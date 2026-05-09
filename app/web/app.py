@@ -741,6 +741,15 @@ def _start_review_thread(
         active_writer = writer_model
         consecutive_gate_fails = 0
         fallback_engaged = False
+        # Set true the first time the fallback writer is engaged so the
+        # next writer round uses a fresh-start prompt instead of the
+        # usual "fix your previous code" framing. Without this the
+        # fallback model just regurgitates the broken primary output.
+        fallback_kickoff_pending = False
+        # Accumulated gate-failure messages so the fallback's kickoff
+        # prompt can list every static issue the previous writer kept
+        # tripping on — not just the latest one.
+        gate_failure_history: list[str] = []
 
         def run_section(*, role: str, model: str, messages: list[ChatMessage]) -> str:
             """Stream one role's response and capture its text. Returns the
@@ -842,6 +851,7 @@ def _start_review_thread(
             if results and not gates_all_passed(results):
                 consecutive_gate_fails += 1
                 feedback = gates_format_for_writer(results)
+                gate_failure_history.append(feedback)
                 _emit_inline_section("gates", "(static analysis)", feedback)
                 return
 
@@ -877,7 +887,7 @@ def _start_review_thread(
                 hardware-grounding mistake. Bypasses the gate
                 threshold entirely.
             """
-            nonlocal active_writer, fallback_engaged
+            nonlocal active_writer, fallback_engaged, fallback_kickoff_pending
             if fallback_engaged:
                 return
             if not fallback_writer_model:
@@ -887,6 +897,11 @@ def _start_review_thread(
             previous = active_writer
             active_writer = fallback_writer_model
             fallback_engaged = True
+            # Tell the next writer-round to use the fresh-start kickoff
+            # prompt instead of the usual "fix your previous code"
+            # template — otherwise the fallback model just regurgitates
+            # whatever broken pattern got us here.
+            fallback_kickoff_pending = True
             if reason == "reviewer_recommended":
                 why = (
                     f"Reviewer recommended a different writer model — the "
@@ -923,6 +938,36 @@ def _start_review_thread(
                 f"{REVISE_INSTRUCTION}\n\n---\n\nOriginal task:\n{prompt}\n\n"
                 f"---\n\nYour previous code:\n\n{prev_writer_text}\n\n"
                 f"---\n\nReviewer's notes:\n\n{feedback_section['text']}"
+            )
+
+        def fallback_kickoff_message(primary_name: str) -> str:
+            """First prompt the fallback writer sees. Fresh-start
+            framing: don't show the broken code (model would just
+            patch the same bug); list every gate failure the primary
+            kept hitting; require single fenced python block (no
+            prose / setup blocks since those are what tripped the
+            block extractor in the first place)."""
+            joined = "\n\n".join(gate_failure_history[-3:]) or "(none recorded)"
+            return (
+                f"You are the fallback builder, taking over from "
+                f"`{primary_name}` which failed static-analysis gates "
+                f"{consecutive_gate_fails} times in a row.\n\n"
+                f"Original user request:\n{prompt}\n\n"
+                f"Required output format:\n"
+                f"- Return EXACTLY ONE fenced ```python ... ``` code block.\n"
+                f"- Do NOT include markdown prose, headers, or shell "
+                f"snippets outside the code block. Setup instructions, "
+                f"if any, go inside the code as comments.\n"
+                f"- Do NOT use wildcard imports (`from x import *`).\n"
+                f"- Code must parse with ast.parse, import cleanly, "
+                f"and not reference undefined names.\n"
+                f"- Import every name you use (no `threading.Thread` "
+                f"without `import threading`, etc.).\n\n"
+                f"Static failures the previous builder kept producing — "
+                f"avoid all of these:\n\n{joined}\n\n"
+                f"Now produce a fresh implementation. Start from "
+                f"scratch — do NOT patch the previous code; the "
+                f"approach was wrong."
             )
 
         try:
@@ -962,14 +1007,24 @@ def _start_review_thread(
                         # Static-analysis trigger only — reviewer is
                         # happy enough with the writer model.
                         maybe_swap_writer()
-                    # Writer revises based on whatever the previous slot
-                    # was (reviewer notes OR gate failures).
-                    prev_writer = next(
-                        (s for s in reversed(sections) if s["role"] == "writer"),
-                        sections[0],
-                    )
-                    revise_user = revise_user_message(prev_writer["text"], sections[-1])
-                    msgs = base_messages() + [ChatMessage(role="user", content=revise_user)]
+                    # Pick the prompt: fresh-start kickoff if we just
+                    # engaged the fallback (don't show it the broken
+                    # code), otherwise the regular revise template.
+                    if fallback_kickoff_pending:
+                        revise_user = fallback_kickoff_message(writer_model)
+                        fallback_kickoff_pending = False
+                        # No base_messages() system prompt — the kickoff
+                        # message is self-contained and includes its own
+                        # output-format constraints. The system prompt
+                        # would just dilute them.
+                        msgs = [ChatMessage(role="user", content=revise_user)]
+                    else:
+                        prev_writer = next(
+                            (s for s in reversed(sections) if s["role"] == "writer"),
+                            sections[0],
+                        )
+                        revise_user = revise_user_message(prev_writer["text"], sections[-1])
+                        msgs = base_messages() + [ChatMessage(role="user", content=revise_user)]
                     text = run_section(role="writer", model=active_writer, messages=msgs)
                     sections.append({"role": "writer", "model": active_writer, "text": text})
                 else:

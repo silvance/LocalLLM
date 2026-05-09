@@ -278,6 +278,71 @@ def test_review_engages_fallback_when_reviewer_recommends(
     assert fallback_idx > 0, "granite writer never called — fallback didn't engage"
 
 
+def test_fallback_writer_gets_fresh_start_prompt(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient,
+) -> None:
+    """When the fallback writer engages, its first prompt must be a
+    fresh-start kickoff (no broken-code-as-starting-point) and must
+    contain the accumulated gate failures so it knows what NOT to do.
+    Captured directly from the chat_service stub — no LLM round-trip."""
+    from app.web import app as web_app
+    from app.utils.review_storage import ReviewStorage
+
+    web_app.review_storage = ReviewStorage(web_app.review_storage.base_dir)
+
+    broken = (
+        "Try this:\n\n"
+        "```python\n"
+        "from scapy.all import *\n"  # F403 — wildcard
+        "def discover():\n"
+        "    return ghost  # F821 — undefined name\n"
+        "```\n"
+    )
+    fixed = "```python\ndef discover():\n    return 1\n```\n"
+    calls = _stub_chat_service(monkeypatch, scripted_outputs=[broken, broken, fixed])
+
+    r = client.post("/api/review", json={
+        "prompt": "build a discoverer",
+        "writer_model": "qwen",
+        "reviewer_model": "gemma",
+        "fallback_writer_model": "granite",
+        "rounds": 5,
+    })
+    assert r.status_code == 200
+    review_id = r.json()["review_id"]
+
+    deadline = time.monotonic() + 5.0
+    saved = None
+    while time.monotonic() < deadline:
+        saved = web_app.review_storage.load(review_id)
+        if saved and saved.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert saved is not None and saved.status == "done"
+
+    # The third writer call (after two gate fails + fallback engages)
+    # is the fallback. Its prompt must be the kickoff, not the regular
+    # revise template.
+    granite_calls = [c for c in calls if c["selection"] == "granite"]
+    assert granite_calls, "fallback (granite) was never invoked"
+    fallback_msgs = granite_calls[0]["messages"]
+    # Kickoff format: single user message, no broken-code preamble.
+    user_content = "\n".join(m.content for m in fallback_msgs if m.role == "user")
+    assert "fallback builder" in user_content.lower()
+    assert "from scratch" in user_content.lower()
+    # Must NOT include the broken code as a starting point — that's
+    # the bug we're fixing. (`ghost` shows up in the gate-failure
+    # echo, but `def discover():` is the actual function body the
+    # fallback would have copied if we used the regular revise prompt.)
+    assert "def discover" not in user_content
+    assert "Your previous code:\n" not in user_content
+    # Kickoff must restate the original task, not "fix what came before".
+    assert "Original user request" in user_content
+    # Must list at least one gate failure the previous writer kept
+    # hitting so the fallback knows what to avoid.
+    assert "import *" in user_content or "wildcard" in user_content.lower()
+
+
 def test_fallback_writer_engages_after_repeated_gate_failures(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:
