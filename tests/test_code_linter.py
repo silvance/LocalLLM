@@ -16,12 +16,42 @@ def test_extracts_explicit_python_blocks() -> None:
     assert extract_python_blocks(text) == ["def foo():\n    return 1\n"]
 
 
-def test_extracts_unhinted_blocks_too() -> None:
-    """Models sometimes drop the `python` hint after the first block."""
+def test_unhinted_blocks_are_skipped() -> None:
+    """Models sometimes drop the language hint, but treating any
+    untagged fence as Python false-matched non-Python content (bash
+    setup snippets, the closing-fence-of-X / prose / opening-of-Y
+    span). We accept missing the rare untagged Python block in
+    exchange for never grabbing bash content."""
     text = "```\nimport os\n```\n```python\nos.path.join('a','b')\n```"
     blocks = extract_python_blocks(text)
-    assert "import os\n" in blocks
-    assert "os.path.join('a','b')\n" in blocks
+    assert blocks == ["os.path.join('a','b')\n"]
+
+
+def test_does_not_grab_bash_blocks() -> None:
+    """Regression for a real failure: a writer's response with one
+    Python block + multiple bash setup blocks was producing 4 'matches'
+    because the regex's empty-language alternative matched the closing
+    fence of one bash block + prose + opening fence of the next."""
+    text = (
+        "Here:\n\n"
+        "```python\n"
+        "def add(a, b):\n    return a + b\n"
+        "```\n\n"
+        "### Setup\n"
+        "Run:\n"
+        "```bash\n"
+        "pip install scapy\n"
+        "```\n\n"
+        "Then:\n"
+        "```bash\n"
+        "sudo iw wlan0 set monitor\n"
+        "```\n"
+    )
+    blocks = extract_python_blocks(text)
+    assert len(blocks) == 1
+    assert "def add" in blocks[0]
+    assert "pip install" not in blocks[0]
+    assert "iw wlan0" not in blocks[0]
 
 
 def test_no_blocks_returns_empty() -> None:
