@@ -1304,16 +1304,45 @@ def _ollama_installed_models(*, force_refresh: bool = False) -> list[str]:
     # parsing, so it survives ollama-python API changes between
     # versions we haven't pinned to.
     from app.services.ollama_models import installed_names
-    try:
-        names = installed_names(base_url)
-    except Exception as exc:
-        logger.warning("Ollama list via /api/tags also failed: %s", exc)
-        names = []
+    candidate_urls = [base_url]
+    # Windows defaults `localhost` to ::1 first, but Ollama only binds
+    # IPv4. If the operator's .env still has `localhost`, the python
+    # client + first HTTP attempt both fail with WinError 10061.
+    # Try the IPv4 loopback as a silent retry before giving up.
+    if "localhost" in base_url and "127.0.0.1" not in base_url:
+        candidate_urls.append(base_url.replace("localhost", "127.0.0.1"))
+
+    names: list[str] = []
+    last_err: Exception | None = None
+    for url in candidate_urls:
+        try:
+            names = installed_names(url)
+            if names:
+                if url != base_url:
+                    logger.warning(
+                        "Ollama unreachable at %s but reachable at %s — "
+                        "set OLLAMA_HOST=%s in .env to silence the retry "
+                        "and avoid the (~1s) IPv6 timeout per page render.",
+                        base_url, url, url,
+                    )
+                break
+        except Exception as exc:
+            last_err = exc
+            continue
+
     if not names:
-        logger.warning(
-            "Ollama at %s returned no models — daemon running but empty?",
-            base_url,
-        )
+        if last_err is not None:
+            logger.warning(
+                "Ollama list failed at %s: %s. "
+                "If Ollama is running but bound to a non-default address, "
+                "set OLLAMA_HOST in .env (e.g. OLLAMA_HOST=http://127.0.0.1:11434).",
+                base_url, last_err,
+            )
+        else:
+            logger.warning(
+                "Ollama at %s returned no models — daemon running but empty?",
+                base_url,
+            )
     _installed_models_cache = (time.monotonic(), names)
     return names
 

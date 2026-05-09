@@ -79,7 +79,11 @@ def get_settings() -> Settings:
         app_env=os.getenv("APP_ENV", "dev"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
 
-        ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        # Default to the explicit IPv4 loopback rather than `localhost`.
+        # Modern Windows resolves `localhost` to `::1` first, but Ollama
+        # only binds IPv4 — the connection refuses with WinError 10061
+        # and the model dropdown ends up empty.
+        ollama_host=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"),
 
         granite_model=os.getenv("GRANITE_MODEL", "granite4"),
         gemma_model=os.getenv("GEMMA_MODEL", "gemma4"),
