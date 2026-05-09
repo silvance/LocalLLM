@@ -168,6 +168,18 @@ def parse(text: str) -> ReviewerVerdict:
         # Unknown action → fall back to safest interpretation.
         action_raw = "approve" if passed else "rebuild_same_writer"
 
+    # Force consistency: if the model says pass=true the orchestrator
+    # MUST short-circuit to approve, even if the model also wrote
+    # `recommended_next_action: rebuild_same_writer` (a contradictory
+    # combination some local models emit). Without this, the review
+    # loop runs another writer round on already-approved code.
+    if passed and action_raw != "approve":
+        action_raw = "approve"
+    # Inverse — pass=false but action="approve" — bumps to the safest
+    # repairable interpretation.
+    if not passed and action_raw == "approve":
+        action_raw = "rebuild_same_writer"
+
     return ReviewerVerdict(
         passed=passed,
         blockers=blockers,

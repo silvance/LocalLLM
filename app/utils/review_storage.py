@@ -86,9 +86,10 @@ class ReviewStorage:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, review_id: str) -> Path:
-        if "/" in review_id or "\\" in review_id or review_id.startswith("."):
-            raise ValueError(f"invalid review id: {review_id!r}")
-        return self.base_dir / f"{review_id}.json"
+        # Whitelist + resolve-and-contained check. See chat_storage._path
+        # for the path-traversal rationale (Windows drive-letter trap).
+        from app.utils.storage_ids import safe_storage_path
+        return safe_storage_path(self.base_dir, review_id, kind="review")
 
     def list_summaries(self) -> list[ReviewSummary]:
         out: list[ReviewSummary] = []

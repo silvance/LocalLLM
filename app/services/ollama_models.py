@@ -86,6 +86,11 @@ def pull_model(model: str, base_url: str) -> Iterator[dict]:
     ``status`` key plus optional ``digest`` / ``total`` / ``completed``
     when downloading layers. We just yield them; the route turns each
     into an SSE event.
+
+    The generator is cancellation-aware via GeneratorExit — calling
+    ``gen.close()`` on the consumer side closes the underlying urlopen
+    response so an in-flight read can't keep the thread wedged when
+    the operator hits Stop.
     """
     name = validate_model_name(model)
     body = json.dumps({"name": name, "stream": True}).encode("utf-8")
@@ -95,11 +100,27 @@ def pull_model(model: str, base_url: str) -> Iterator[dict]:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    resp = None
     try:
-        # Long-running download — no read timeout. Connection timeout
-        # still applies via the default. The caller (job runner) is
-        # responsible for cancellation.
-        with urllib.request.urlopen(req, timeout=None) as resp:
+        try:
+            # Long-running download — no read timeout. Connection timeout
+            # still applies via the default. The caller is responsible
+            # for cancellation via gen.close().
+            resp = urllib.request.urlopen(req, timeout=None)
+        except urllib.error.HTTPError as exc:
+            # Ollama returns the error body as JSON; surface it so the
+            # UI can show e.g. "model not found in registry".
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                payload = {"error": exc.reason or str(exc)}
+            yield {"error": str(payload.get("error") or payload), "http_status": exc.code}
+            return
+        except (urllib.error.URLError, OSError) as exc:
+            yield {"error": f"transport error: {exc}"}
+            return
+
+        try:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
@@ -108,13 +129,19 @@ def pull_model(model: str, base_url: str) -> Iterator[dict]:
                     yield json.loads(line)
                 except json.JSONDecodeError:
                     yield {"status": line}
-    except urllib.error.HTTPError as exc:
-        # Ollama returns the error body as JSON; surface it so the UI
-        # can show e.g. "model not found in registry".
-        try:
-            payload = json.loads(exc.read().decode("utf-8"))
-        except Exception:
-            payload = {"error": exc.reason or str(exc)}
-        yield {"error": str(payload.get("error") or payload), "http_status": exc.code}
-    except (urllib.error.URLError, OSError) as exc:
-        yield {"error": f"transport error: {exc}"}
+        except (OSError, ConnectionError) as exc:
+            # http.client.IncompleteRead is a HTTPException, not an
+            # OSError on every Python — match by name as a safety net.
+            yield {"error": f"stream interrupted: {exc}"}
+        except Exception as exc:  # noqa: BLE001 — IncompleteRead etc.
+            cls = type(exc).__name__
+            if cls == "IncompleteRead" or "Read" in cls:
+                yield {"error": f"stream interrupted: {exc}"}
+            else:
+                raise
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass

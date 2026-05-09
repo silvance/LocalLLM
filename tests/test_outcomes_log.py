@@ -159,3 +159,37 @@ def test_hash_prompt_short_form_for_log_compactness() -> None:
     assert h.startswith("sha256:")
     # 16 hex chars is enough for grouping without the full 64.
     assert len(h.split(":", 1)[1]) == 16
+
+
+def test_concurrent_appends_dont_interleave_lines(tmp_path: Path) -> None:
+    """Two threads writing simultaneously to the same OutcomeLog must
+    produce a clean JSONL — never partial lines that read_all would
+    silently drop as malformed."""
+    import threading
+
+    log = OutcomeLog(tmp_path / "out.jsonl")
+    n_per_thread = 200
+    barrier = threading.Barrier(2)
+
+    def _writer(writer_id: str) -> None:
+        barrier.wait()
+        for i in range(n_per_thread):
+            log.append(
+                review_id=f"r-{writer_id}-{i}",
+                writer=writer_id,
+                event="gate_pass",
+                prompt_hash=f"sha256:{i:016x}",
+            )
+
+    t1 = threading.Thread(target=_writer, args=("threadA",))
+    t2 = threading.Thread(target=_writer, args=("threadB",))
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+
+    rows = list(log.read_all())
+    # All 400 rows must parse — no half-lines lost to interleave.
+    assert len(rows) == n_per_thread * 2
+    by_writer: dict[str, int] = {}
+    for r in rows:
+        by_writer[r["writer"]] = by_writer.get(r["writer"], 0) + 1
+    assert by_writer == {"threadA": n_per_thread, "threadB": n_per_thread}

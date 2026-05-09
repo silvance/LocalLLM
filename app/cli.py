@@ -111,6 +111,14 @@ def cmd_serve(argv: list[str]) -> int:
             supervisor = OllamaSupervisor(host="127.0.0.1", port=args.ollama_port)
             if supervisor.start(wait=True, timeout=30.0):
                 stack.callback(supervisor.stop)
+                # Belt-and-suspenders: ExitStack only fires when
+                # cmd_serve returns normally. uvicorn's own SIGINT
+                # handling can short-circuit that path, leaving the
+                # ollama child orphaned. atexit runs even on those
+                # paths (just not on os._exit / SIGKILL) and stop()
+                # is idempotent + lock-guarded.
+                import atexit
+                atexit.register(supervisor.stop)
                 os.environ[OLLAMA_HOST_ENV] = supervisor.base_url
                 print(f"Ollama serving at {supervisor.base_url}", flush=True)
             else:

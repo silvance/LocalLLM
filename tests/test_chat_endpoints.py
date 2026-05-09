@@ -158,6 +158,50 @@ def test_edit_rejects_empty_content(client: TestClient) -> None:
 # Hidden anti-hallucination baseline is prepended to every system message
 # ---------------------------------------------------------------------------
 
+def test_origin_guard_blocks_cross_origin_post(client: TestClient) -> None:
+    """A POST with an Origin header pointing at a non-localhost host
+    must be rejected — defends against a malicious local web page
+    issuing DELETEs / pulls / etc. against 127.0.0.1:8000."""
+    r = client.post(
+        "/chats",
+        headers={"Origin": "https://evil.example.com"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 403
+
+
+def test_origin_guard_allows_same_origin(client: TestClient) -> None:
+    r = client.post(
+        "/chats",
+        headers={"Origin": "http://127.0.0.1:8000"},
+        follow_redirects=False,
+    )
+    assert r.status_code in (200, 303)
+
+
+def test_origin_guard_allows_no_origin_header(client: TestClient) -> None:
+    """curl / programmatic clients don't send Origin — and they're
+    not browsers, so they aren't the CSRF threat."""
+    r = client.post("/chats", follow_redirects=False)
+    assert r.status_code in (200, 303)
+
+
+def test_origin_guard_allows_get_unconditionally(client: TestClient) -> None:
+    """GET / HEAD / OPTIONS bypass the origin check (they're idempotent
+    and rarely have side effects)."""
+    r = client.get("/", headers={"Origin": "https://evil.example.com"},
+                   follow_redirects=False)
+    assert r.status_code in (200, 303)
+
+
+def test_path_traversal_blocked_at_chat_route(client: TestClient) -> None:
+    """Even if the ID slips past FastAPI routing, the storage layer
+    refuses to construct a path outside its base_dir. Tests the
+    Windows drive-letter case specifically."""
+    r = client.delete("/chats/C:malicious")
+    assert r.status_code in (400, 422, 500)  # ValueError → some error
+
+
 def test_chat_request_prepends_baseline_system_prompt(
     monkeypatch: pytest.MonkeyPatch, client: TestClient,
 ) -> None:

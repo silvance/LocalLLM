@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
@@ -93,6 +94,13 @@ class OutcomeLog:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Concurrent _runner threads (two reviews running in parallel)
+        # both call append() — POSIX guarantees atomic appends only up
+        # to PIPE_BUF (~4KB), and Windows doesn't even guarantee that.
+        # Serialize through this lock so JSONL stays one-row-per-line
+        # and a power-loss mid-write doesn't lose buffered events from
+        # other threads.
+        self._lock = threading.Lock()
 
     def append(
         self,
@@ -123,8 +131,16 @@ class OutcomeLog:
             row["detail"] = detail[:200]
         line = json.dumps(row, ensure_ascii=False)
         try:
-            with self.path.open("a", encoding="utf-8") as f:
+            with self._lock, self.path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    # fsync may not be supported on all filesystems
+                    # (e.g. some network mounts) — line is at least
+                    # in the OS buffer cache.
+                    pass
         except OSError as exc:
             # Logging failure must never break a review — swallow + warn.
             logger.warning("OutcomeLog write failed: %s", exc)

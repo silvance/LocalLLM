@@ -230,7 +230,16 @@ def gate_smoke(code: str, *, timeout: float = 5.0) -> GateResult:
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "review_smoke.py"
-        path.write_text(code, encoding="utf-8")
+        # `errors="surrogatepass"` so lone surrogates (occasionally
+        # emitted by quantized models) don't crash the gate before
+        # subprocess gets a chance to surface a real error.
+        try:
+            path.write_text(code, encoding="utf-8", errors="surrogatepass")
+        except (OSError, UnicodeError) as exc:
+            return GateResult(
+                "smoke", passed=False,
+                messages=[f"could not write candidate to disk: {exc}"],
+            )
         try:
             proc = subprocess.run(
                 [sys.executable, "-c", "import review_smoke"],
@@ -275,14 +284,17 @@ def gate_smoke(code: str, *, timeout: float = 5.0) -> GateResult:
 # than false negatives, and the reviewer's Class 3 prompt block is the
 # secondary check.
 _PLACEHOLDER_PATTERNS: tuple[tuple["re.Pattern[str]", str], ...] = (
-    # Comments that announce the code is a stand-in.
+    # Comments that announce the code is a stand-in. Each `would.* in
+    # production`-style alternative is bounded to {0,40} non-newline
+    # chars to avoid catastrophic backtracking on a malicious-looking
+    # 500-char comment line.
     (re.compile(
         r"#.*\b("
         r"placeholder|stubbed|stub for|for demonstration|for now,? just|"
         r"todo:?\s*(?:implement|actually|real|hook up|wire)|"
         r"fixme:?\s*(?:implement|actually|real|hook up|wire)|"
         r"in (?:a )?real (?:impl|implementation|version)|"
-        r"would.* in (?:production|the real thing)|"
+        r"would[^\n]{0,40}? in (?:production|the real thing)|"
         r"simulated\b|simulating\b|simulate\b|"
         r"mocked\b|mocking\b|"
         r"demonstrative purposes?"

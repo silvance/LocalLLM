@@ -105,6 +105,32 @@ class JobManager:
             self._subscribers[job_id].append(q)
             return job, q
 
+    def subscribe_with_snapshot(
+        self, job_id: str,
+    ) -> tuple[Optional[Job], Optional[asyncio.Queue], Optional[dict]]:
+        """Like ``subscribe`` but ALSO returns an atomic snapshot of
+        ``(text, checkpoints, status)`` taken under the lock. Lets the
+        SSE replay path emit a frozen view instead of reading mutable
+        job fields while the producer thread continues to mutate them
+        — without this, replay can yield duplicate chunks (replay
+        sees N tokens, then live mode delivers an event the producer
+        emitted between snapshot and queue.put). Returns
+        (job, queue, snapshot)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None, None, None
+            q: asyncio.Queue = asyncio.Queue()
+            self._subscribers[job_id].append(q)
+            snapshot = {
+                "text": job.text,
+                "checkpoints": list(job.checkpoints),
+                "status": job.status,
+                "error": job.error,
+                "metadata": dict(job.metadata),
+            }
+            return job, q, snapshot
+
     def unsubscribe(self, job_id: str, queue: asyncio.Queue) -> None:
         with self._lock:
             subs = self._subscribers.get(job_id)
@@ -120,8 +146,17 @@ class JobManager:
     ) -> None:
         with self._lock:
             subs = list(self._subscribers.get(job_id, []))
+        # Run each subscriber in its own try/except: a closed event
+        # loop (server shutting down) raises RuntimeError synchronously
+        # from run_coroutine_threadsafe, and one bad subscriber
+        # shouldn't kill the broadcast for the others.
         for q in subs:
-            asyncio.run_coroutine_threadsafe(q.put((event, payload)), loop)
+            try:
+                asyncio.run_coroutine_threadsafe(q.put((event, payload)), loop)
+            except RuntimeError:
+                # Loop closed; drop this subscriber so we don't keep
+                # trying the same dead loop on every subsequent event.
+                self.unsubscribe(job_id, q)
 
     # ------------------------------------------------------------------ producer side
 

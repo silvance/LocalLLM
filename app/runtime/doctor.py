@@ -125,12 +125,22 @@ def check_models_on_disk() -> CheckResult:
                 "`ollama pull granite4` to fetch a starter model.",
         )
     found: list[str] = []
-    for tag_file in manifests.rglob("*"):
-        if tag_file.is_file():
-            # Manifest path encodes registry/library/<model>/<tag>
-            rel = tag_file.relative_to(manifests).as_posix().split("/")
-            if len(rel) >= 4:
-                found.append(f"{rel[-2]}:{rel[-1]}")
+    try:
+        for tag_file in manifests.rglob("*"):
+            try:
+                if tag_file.is_file():
+                    # Manifest path encodes registry/library/<model>/<tag>
+                    rel = tag_file.relative_to(manifests).as_posix().split("/")
+                    if len(rel) >= 4:
+                        found.append(f"{rel[-2]}:{rel[-1]}")
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError) as exc:
+        return CheckResult(
+            "models on disk", "warn",
+            f"could not enumerate {manifests}: {exc}",
+            fix="Check filesystem permissions on the models directory.",
+        )
     if not found:
         return CheckResult(
             "models on disk",
