@@ -59,6 +59,103 @@ def _pick_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _find_pid_on_port(host: str, port: int) -> int | None:
+    """Best-effort: which PID is bound to ``host:port``?
+
+    Used only to enrich the "port already in use" error message. We
+    iterate psutil's connection table and match on the local
+    address. ``host`` may be ``0.0.0.0`` or ``127.0.0.1``; we accept
+    either holding the port as "the conflict" since binding 0.0.0.0
+    blocks 127.0.0.1 too.
+
+    Returns ``None`` on any failure (psutil missing, lookup raised,
+    or no match). Callers must handle the missing-PID case — we'd
+    rather a slightly less helpful message than crash the whole
+    startup just because we couldn't enumerate sockets.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        # net_connections() needs admin on Windows for full visibility,
+        # but is allowed for the current user's own processes — which
+        # is exactly the common case (a previous LocalLLM you started).
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.status != psutil.CONN_LISTEN:
+                continue
+            if conn.laddr is None or conn.laddr.port != port:
+                continue
+            laddr_host = conn.laddr.ip
+            # Match if the listener is on our exact host, on the
+            # any-address wildcard (which shadows specific binds), or
+            # on the IPv6 any-address ::.
+            if laddr_host in (host, "0.0.0.0", "::", ""):
+                if conn.pid:
+                    return int(conn.pid)
+    except (psutil.AccessDenied, OSError, RuntimeError):
+        return None
+    return None
+
+
+def _ensure_port_free(host: str, port: int) -> int:
+    """Probe ``host:port`` before uvicorn announces lifespan startup.
+
+    Returns 0 if the port is free.
+
+    Returns a non-zero exit code (and prints a usable error to
+    stderr) if the port is already bound. Exiting before uvicorn
+    starts saves the operator from the misleading "Application
+    startup complete" line that uvicorn prints BEFORE attempting
+    its own bind — the previous failure mode where it looked like
+    LocalLLM started cleanly and then crashed without explanation.
+
+    This is a check, not a probe-then-bind race-prone reservation.
+    There's a tiny window between this check and uvicorn's bind
+    where another process could grab the port; in that case
+    uvicorn's error surfaces normally. The check exists for the
+    much more common case: port permanently held by another
+    LocalLLM the operator forgot about.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # SO_REUSEADDR semantics differ between platforms — on Windows
+    # it allows binding over a TIME_WAIT socket, on Linux it does
+    # something else. We INTENTIONALLY don't set it: if the previous
+    # process is still in TIME_WAIT, that's a real problem the
+    # operator should know about (it'll bite uvicorn next).
+    try:
+        try:
+            s.bind((host, port))
+        except OSError as exc:
+            pid = _find_pid_on_port(host, port)
+            owner = f"PID {pid}" if pid else "another process"
+            # WinError 10048 / EADDRINUSE / EACCES (permission, e.g.
+            # binding privileged ports as non-root) all surface here.
+            sys.stderr.write(
+                f"\nERROR: cannot bind to {host}:{port} — {owner} "
+                f"already has it.\n"
+                f"\n"
+                f"Fix one of:\n"
+                f"  1. Stop the conflicting process. On Windows:\n"
+                f"       Get-NetTCPConnection -LocalPort {port} | "
+                f"Select OwningProcess\n"
+                f"       Stop-Process -Id <PID> -Force\n"
+                f"     On macOS / Linux:\n"
+                f"       lsof -i :{port}\n"
+                f"       kill <PID>\n"
+                f"  2. Run LocalLLM on a different port:\n"
+                f"       LocalLLM serve --port {port + 1}\n"
+                f"  3. Let the kernel pick a free port automatically:\n"
+                f"       LocalLLM serve --port 0\n"
+                f"\n"
+                f"Underlying error: {exc}\n"
+            )
+            return 1
+    finally:
+        s.close()
+    return 0
+
+
 def _wait_for_http(host: str, port: int, timeout: float = 30.0) -> bool:
     """Poll until host:port accepts TCP, or give up after `timeout` seconds."""
     from app.runtime.ollama_supervisor import is_port_open
@@ -136,6 +233,19 @@ def cmd_serve(argv: list[str]) -> int:
 
         port = args.port or _pick_free_port()
         url = f"http://{args.host}:{port}"
+
+        # Pre-bind probe. Uvicorn announces "Application startup
+        # complete" BEFORE attempting its own bind, so a port-in-use
+        # failure looks like a successful startup followed by a
+        # mysterious crash. Catch the conflict here and exit with a
+        # message that names the offending PID and the fix.
+        # Skipped when the operator passed --port 0 (kernel picks a
+        # free port → never collides) and when --port wasn't passed
+        # (we already called _pick_free_port above).
+        if args.port and args.port != 0:
+            rc = _ensure_port_free(args.host, port)
+            if rc != 0:
+                return rc
         print(f"Starting LocalLLM on {url} ...", flush=True)
 
         def _serve() -> None:
