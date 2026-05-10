@@ -687,36 +687,35 @@ async def review_load_page(review_id: str, request: Request):
     )
 
 
+def _is_live_review_job(job) -> bool:
+    """A review job qualifies for /review redirect only if all three
+    hold:
+      - status is still pending or streaming (not finished/errored)
+      - stop has NOT been requested (closes the timing window between
+        DELETE-triggered stop and the runner thread noticing)
+      - the linked storage row still exists (otherwise we'd redirect
+        to a deleted review_id, which is the 404 loop the user
+        reported)
+    """
+    if job.status not in ("pending", "streaming"):
+        return False
+    if job_manager.is_stop_requested(job.id):
+        return False
+    rid = str(job.request_data.get("review_id") or "")
+    return bool(rid) and review_storage.load(rid) is not None
+
+
 def _find_active_review_id() -> Optional[str]:
     """Most-recent review whose job is still streaming. Returns the
-    review_id (which doubles as a route key) so /review can redirect.
-
-    Skips jobs whose stop has been requested but whose runner thread
-    hasn't yet flipped the status off "streaming" — there's a timing
-    window between DELETE-triggered stop and the runner noticing,
-    during which we'd otherwise redirect to a review_id whose
-    storage row was just deleted (404 loop the user reported)."""
+    review_id (which doubles as a route key) so /review can redirect."""
     candidates = [
         j for j in job_manager.list_with_chat_prefix("review-")
-        if j.status in ("pending", "streaming")
-        and not job_manager.is_stop_requested(j.id)
-    ]
-    if not candidates:
-        return None
-    # Belt-and-suspenders: even if a runner thread didn't pick up the
-    # stop yet, /review must not redirect to a review_id whose
-    # storage row no longer exists. Dead rows mean a deleted review
-    # — skip those candidates.
-    candidates = [
-        j for j in candidates
-        if review_storage.load(str(j.request_data.get("review_id") or ""))
-        is not None
+        if _is_live_review_job(j)
     ]
     if not candidates:
         return None
     job = max(candidates, key=lambda j: j.started_at)
-    rid = str(job.request_data.get("review_id") or "")
-    return rid or None
+    return str(job.request_data.get("review_id") or "") or None
 
 
 def _render_review_page(request: Request, loaded, active_job_id=None) -> HTMLResponse:

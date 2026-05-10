@@ -18,6 +18,13 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
+from app.agent.grounding import (
+    VerifiedSources,
+    add_fetch_result,
+    add_search_result,
+    apply_verification,
+)
+
 
 logger = logging.getLogger("localllm")
 
@@ -258,10 +265,6 @@ def run_agent(
     # layers of system prompt did NOT stop the model from inventing
     # confident-looking CVEs and source URLs in real runs — this is
     # the deterministic backstop.
-    from app.agent.grounding import (
-        VerifiedSources, add_search_result, add_fetch_result,
-        apply_verification,
-    )
     verified_sources = VerifiedSources()
 
     iteration = 0
@@ -406,7 +409,7 @@ def run_agent(
                 final_answer, verified_sources,
             )
             final_answer = new_answer
-        except Exception as exc:
+        except Exception:
             # Verification must NEVER break the agent — log and skip.
             # Operator gets the unverified answer in that case (which
             # is no worse than the pre-verification status quo).

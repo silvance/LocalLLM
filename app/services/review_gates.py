@@ -143,6 +143,17 @@ def gate_syntax(code: str) -> GateResult:
     return GateResult("syntax", passed=True)
 
 
+def _try_parse(code: str) -> ast.Module | None:
+    """Parse helper for downstream gates. Returns the module on
+    success, or None if the code has a syntax error — gate_syntax
+    is the one that reports those, so AST-using gates short-circuit
+    silently to avoid double-noise."""
+    try:
+        return ast.parse(code)
+    except SyntaxError:
+        return None
+
+
 def gate_lint(code: str) -> GateResult:
     """Gate 2: pyflakes — undefined names, unused imports, redefined
     symbols, etc. We reuse code_linter.lint_code so the rules match
@@ -236,10 +247,8 @@ def gate_imports(code: str) -> GateResult:
         have them. The orchestrator routes to the reviewer with a
         note instead of bouncing back to the writer.
     """
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        # gate_syntax already reported this — don't double-emit.
+    tree = _try_parse(code)
+    if tree is None:
         return GateResult("import", passed=True)
 
     imports: list[str] = []
@@ -642,19 +651,17 @@ def _find_busy_loops(tree: ast.AST) -> list[tuple[int, str]]:
             continue
         only = body[0]
         if isinstance(only, ast.Pass):
-            findings.append((
-                node.lineno,
-                "`while True: pass` busy-loop burns 100% CPU forever — "
-                "use `signal.pause()`, `time.sleep(...)`, or "
-                "`threading.Event().wait()` instead",
-            ))
+            keyword = "pass"
         elif isinstance(only, ast.Continue):
-            findings.append((
-                node.lineno,
-                "`while True: continue` busy-loop burns 100% CPU forever — "
-                "use `signal.pause()`, `time.sleep(...)`, or "
-                "`threading.Event().wait()` instead",
-            ))
+            keyword = "continue"
+        else:
+            continue
+        findings.append((
+            node.lineno,
+            f"`while True: {keyword}` busy-loop burns 100% CPU forever — "
+            "use `signal.pause()`, `time.sleep(...)`, or "
+            "`threading.Event().wait()` instead",
+        ))
     return findings
 
 
@@ -764,19 +771,15 @@ def gate_runtime_anti_patterns(code: str) -> GateResult:
     on a BLE/Wi-Fi sniffer task. Reviewer hallucinated unrelated bugs
     while missing these — adding a static gate so the bad pattern
     never reaches the reviewer in the first place."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        # gate_syntax already failed and short-circuited; if somehow
-        # we got here, just pass — don't double-report.
+    tree = _try_parse(code)
+    if tree is None:
         return GateResult("runtime_anti_patterns", passed=True)
 
     findings: list[str] = []
     for lineno, msg in _find_busy_loops(tree):
         findings.append(f"line {lineno}: {msg}")
-    if isinstance(tree, ast.Module):
-        for lineno, msg in _find_conditional_imports_used_module_wide(tree):
-            findings.append(f"line {lineno}: {msg}")
+    for lineno, msg in _find_conditional_imports_used_module_wide(tree):
+        findings.append(f"line {lineno}: {msg}")
 
     if not findings:
         return GateResult("runtime_anti_patterns", passed=True)
